@@ -230,6 +230,46 @@ struct ExprKind
     std::optional<GenericParams> generic_params;
     std::vector<std::pair<ExprPtr,ExprPtr>> map_pairs;  // Map{"k": v}
 
+    Expr* subject() const
+    {
+        switch (tag)
+        {
+            case Tag::Index:       return target.get();
+            case Tag::Field:       return target.get();
+            case Tag::Scope:       return target.get();
+            case Tag::Unary:       return operand.get();
+            case Tag::Await:       return awaited.get();
+            case Tag::ChannelSend: return channel.get();
+            default:               return nullptr;
+        }
+    }
+
+    // Returns the secondary / payload expression.
+    Expr* value() const
+    {
+        switch (tag)
+        {
+            case Tag::Binary:
+            case Tag::Assign:      return rhs.get();
+            case Tag::Index:       return index.get();      // the subscript
+            case Tag::ChannelSend: return send_val.get();   // what is sent
+            default:               return nullptr;
+        }
+    }
+
+    // Returns the string name relevant to this node.
+    const std::string& name() const
+    {
+        // Field / Scope: the member name on the right of '.' or '::'
+        if (tag == Tag::Field || tag == Tag::Scope) return member;
+        // Id: the identifier string
+        if (tag == Tag::Id) return id.name();
+        // For everything else this is a programming error.
+        // Return an empty static string so callers don't crash.
+        static const std::string empty;
+        return empty;
+    }
+
     static ExprKind makeLit(LitKind l) {
         ExprKind ek;
         ek.tag = Tag::Lit;
@@ -262,6 +302,33 @@ struct ExprKind
         ek.tag = Tag::Call;
         ek.callee = std::move(callee);
         ek.args = std::move(args);
+        return ek;
+    }
+
+    static ExprKind makeIndex(ExprPtr collection, ExprPtr subscript)
+    {
+        ExprKind ek;
+        ek.tag    = Tag::Index;
+        ek.target = std::move(collection);
+        ek.index  = std::move(subscript);
+        return ek;
+    }
+
+    static ExprKind makeField(ExprPtr object, std::string field_name)
+    {
+        ExprKind ek;
+        ek.tag    = Tag::Field;
+        ek.target = std::move(object);
+        ek.member = std::move(field_name);
+        return ek;
+    }
+
+    static ExprKind makeScope(ExprPtr ns, std::string item_name)
+    {
+        ExprKind ek;
+        ek.tag    = Tag::Scope;
+        ek.target = std::move(ns);
+        ek.member = std::move(item_name);
         return ek;
     }
 
