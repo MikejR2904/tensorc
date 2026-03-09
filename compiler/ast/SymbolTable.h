@@ -15,6 +15,7 @@ struct Symbol {
     Position    pos;
     std::vector<int> shape;
     std::vector<TyKind> param_types;
+    TyKind elem_ty = TyKind::Infer;
     std::optional<GenericParams> tensor_info;
     bool is_const = false;
     bool is_parallel_safe = true; 
@@ -29,7 +30,7 @@ public:
         if (symbols.find(sym.name) != symbols.end()) {
             return nullptr; 
         }
-        auto [it, inserted] = symbols.emplace(sym.name, std::make_unique<Symbol>(sym));
+        auto [it, _] = symbols.emplace(sym.name, std::make_unique<Symbol>(sym));
         return it->second.get();
     }
 

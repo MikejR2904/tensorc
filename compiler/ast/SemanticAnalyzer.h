@@ -28,13 +28,13 @@ private:
     TyKind validate_stmt(Stmt* stmt) {
         if (!stmt) return TyKind::Void;
         switch (stmt->kind.tag) {
-            case StmtKind::Tag::Let:
-                return validate_let(stmt);
-            case StmtKind::Tag::Func:
+            case StmtKind::Tag::Let: return validate_let(stmt);
+            case StmtKind::Tag::Func: {
                 if (stmt->kind.func.has_value()) {
                     return validate_func(stmt->kind.func.value());
                 }
                 return TyKind::Void;
+            }
             case StmtKind::Tag::Return: {
                 TyKind actual = stmt->kind.ret_expr
                     ? validate_expr(stmt->kind.ret_expr.get())
@@ -42,33 +42,28 @@ private:
                 expect_compat(expected_ret_ty, actual, stmt->pos, "Return type mismatch");           
                 return actual;
             }
-            case StmtKind::Tag::If:
-                return validate_if(stmt);
-            case StmtKind::Tag::Else:
-                return validate_compound(stmt->kind.else_body, false);
-            case StmtKind::Tag::While:
-                return validate_while(stmt);
-            case StmtKind::Tag::For: 
-                return validate_for(stmt);
-            case StmtKind::Tag::Compound:
-                return validate_compound(stmt->kind.compound, false);
-            case StmtKind::Tag::Expr:
-                return validate_expr(stmt->kind.expr.get());
+            case StmtKind::Tag::If: return validate_if(stmt);
+            case StmtKind::Tag::Else: return validate_compound(stmt->kind.else_body, false);
+            case StmtKind::Tag::While: return validate_while(stmt);
+            case StmtKind::Tag::For: return validate_for(stmt);
+            case StmtKind::Tag::Compound: return validate_compound(stmt->kind.compound, false);
+            case StmtKind::Tag::Expr: return validate_expr(stmt->kind.expr.get());
             case StmtKind::Tag::Break:
-            case StmtKind::Tag::Continue:
+            case StmtKind::Tag::Continue: {
                 if (iteration_depth == 0) {
                     error("Statement must be inside a loop context", stmt->pos);
                 }
                 return TyKind::Void;
-            case StmtKind::Tag::Match:
-                return validate_match(stmt);
-            default:
-                return TyKind::Void;
+            }
+            case StmtKind::Tag::Match: return validate_match(stmt);
+            case StmtKind::Tag::Spawn: return validate_spawn(stmt);
+            case StmtKind::Tag::Import: return TyKind::Void; // TODO: open registry
+            default: return TyKind::Void;
         }
-        return TyKind::Void;
+        return TyKind::Void; 
     }
 
-    TyKind validate_let(Stmt* stmt) {
+    TyKind validate_let(Stmt* stmt) { // let x [: T] = expr
         // Validate RHS first to prevent recursive definitions like 'let x = x'
         TyKind rhs_ty = validate_expr(stmt->kind.let_expr.get());
         TyKind var_ty = stmt->kind.let_ident.ty_kind();
@@ -79,11 +74,25 @@ private:
             expect_compat(var_ty, rhs_ty, stmt->pos, "Variable assignment type mismatch");
         }
         // Extract shape from generic params if present, Define in Symbol Table
-        std::vector<int> var_shape;
-        if (var_ty == TyKind::Tensor && stmt->kind.let_expr->kind.generic_params.has_value()) {
-            var_shape = stmt->kind.let_expr->kind.generic_params->shape;
+        std::vector<int> shape;
+        TyKind elem_ty = TyKind::Infer;
+        if (var_ty == TyKind::Tensor && stmt->kind.let_expr && stmt->kind.let_expr->kind.generic_params.has_value())
+        {
+            shape = stmt->kind.let_expr->kind.generic_params->shape;
         }
-        symb_tab.define(Symbol(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos, var_shape));
+        if (var_ty == TyKind::Array && stmt->kind.let_expr) {
+            auto& elems = stmt->kind.let_expr->kind.elements;
+            if (!elems.empty()) {
+                elem_ty = elems[0]->kind.lit.tag == LitKind::Tag::Int   ? TyKind::I32  :
+                        elems[0]->kind.lit.tag == LitKind::Tag::Float  ? TyKind::F32  :
+                        elems[0]->kind.lit.tag == LitKind::Tag::Bool   ? TyKind::Bool :
+                        elems[0]->kind.lit.tag == LitKind::Tag::Str    ? TyKind::Str  :
+                        TyKind::Infer;
+            }
+        }
+        Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos, shape);
+        sym.elem_ty = elem_ty;
+        symb_tab.define(sym);
         return var_ty;
     }
 
@@ -115,35 +124,26 @@ private:
     TyKind validate_expr(Expr* expr) {
         if (!expr) return TyKind::Void;
         switch (expr->kind.tag) {
-            case ExprKind::Tag::Lit:
-                return validate_lit(expr->kind.lit);
+            case ExprKind::Tag::Lit: return validate_lit(expr->kind.lit);
             case ExprKind::Tag::Id: {
                 const std::string& name = expr->kind.id.name();
                 if (name == "_") return TyKind::Infer;
                 Symbol* s = symb_tab.lookup(name);
-                if (!s) {
-                    error("Undefined identifier: " + expr->kind.id.name(), expr->pos);
-                }
+                if (!s) error("Undefined identifier: " + expr->kind.id.name(), expr->pos);
                 // Update AST node with the resolved type for the code generator
                 expr->kind.id.set_ty_kind(s->type);
                 return s->type;
             }
-            case ExprKind::Tag::Unary:
-                return validate_unary(expr->kind.unary_op, expr->kind.operand.get(), expr->pos);
-            case ExprKind::Tag::Binary:
-                return validate_bin_op(expr->kind.bin_op, expr->kind.lhs.get(), expr->kind.rhs.get(), expr->pos);
+            case ExprKind::Tag::Unary: return validate_unary(expr->kind.unary_op, expr->kind.operand.get(), expr->pos);
+            case ExprKind::Tag::Binary: return validate_bin_op(expr->kind.bin_op, expr->kind.lhs.get(), expr->kind.rhs.get(), expr->pos);
             case ExprKind::Tag::Assign:
                 TyKind l = validate_expr(expr->kind.lhs.get());
                 TyKind r = validate_expr(expr->kind.rhs.get());
                 expect_compat(l, r, expr->pos, "Assignment type mismatch");
                 return TyKind::Void;
-            case ExprKind::Tag::Call:
-                return validate_call(expr);
-            case ExprKind::Tag::Pipe: {
-                return validate_pipe(expr);
-            }
-            case ExprKind::Tag::Grad: {
-                // grad(loss, params)
+            case ExprKind::Tag::Call: return validate_call(expr);
+            case ExprKind::Tag::Pipe: return validate_pipe(expr);
+            case ExprKind::Tag::Grad: { // grad(loss, params)
                 TyKind loss_ty = validate_expr(expr->kind.grad_loss.get());
                 if (loss_ty != TyKind::F32 && loss_ty != TyKind::F64 && loss_ty != TyKind::Infer) {
                     error("grad() requires a scalar loss (F32 or F64)", expr->pos);
@@ -165,10 +165,9 @@ private:
                 }
                 return then_ty;
             }
-            case ExprKind::Tag::Block:
-                return validate_compound(expr->kind.block, false);
-            case ExprKind::Tag::TensorLit:  return TyKind::Tensor;
-            case ExprKind::Tag::ArrayLit:   {
+            case ExprKind::Tag::Block: return validate_compound(expr->kind.block, false);
+            case ExprKind::Tag::TensorLit: return TyKind::Tensor;
+            case ExprKind::Tag::ArrayLit: {
                 if (expr->kind.elements.empty()) return TyKind::Array;
                 TyKind first_ty = validate_expr(expr->kind.elements[0].get());
                 for (size_t i = 1; i < expr->kind.elements.size(); ++i) {
@@ -194,25 +193,33 @@ private:
                 // Map{"key": value} -> map_pairs is vector<pair<ExprPtr, ExprPtr>>
                 TyKind k_ty = validate_expr(expr->kind.map_pairs[0].first.get());
                 TyKind v_ty = validate_expr(expr->kind.map_pairs[0].second.get());
-                for (auto& pair : expr->kind.map_pairs) {
+                for (size_t i = 1; i < expr->kind.map_pairs.size(); ++i) {
+                    auto& pair = expr->kind.map_pairs[i];
                     expect_compat(k_ty, validate_expr(pair.first.get()), expr->pos, "Inconsistent Map key");
                     expect_compat(v_ty, validate_expr(pair.second.get()), expr->pos, "Inconsistent Map value");
                 }
                 return TyKind::Map;
             }
-            case ExprKind::Tag::Index: {      // expr[i]
-                TyKind obj = validate_expr(expr->kind.obj.get());
+            case ExprKind::Tag::Index: { // expr[i]
+                TyKind obj = validate_expr(expr->kind.target.get());
                 TyKind idx = validate_expr(expr->kind.index.get());
                 if (idx != TyKind::I32 && idx != TyKind::I64) error("Index must be integer", expr->pos);
-                return (obj == TyKind::Tensor) ? TyKind::F32 : TyKind::Infer;
+                if (obj != TyKind::Tensor) return TyKind::Infer;
+                if (expr->kind.target->kind.tag == ExprKind::Tag::Id) {
+                    Symbol* s = symb_tab.lookup(expr->kind.target->kind.id.name());
+                    if (s && !s->shape.empty()) return (s->shape.size() == 1) ? TyKind::F32 : TyKind::Tensor;
+                }
             }
-            case ExprKind::Tag::Field: {      // expr.member
-                validate_expr(expr->kind.obj.get());
+            case ExprKind::Tag::Field: { // expr.member
+                validate_expr(expr->kind.target.get());
                 // TODO: Look up member in obj_ty's definition
                 return TyKind::Infer;
             }
-            case ExprKind::Tag::Scope: return TyKind::Infer;      // expr::member
-            case ExprKind::Tag::Range: {      // lo..hi
+            case ExprKind::Tag::Scope: { // expr::member
+                validate_expr(expr->kind.target.get());
+                return TyKind::Infer;
+            }
+            case ExprKind::Tag::Range: { // lo..hi
                 TyKind lo = validate_expr(expr->kind.lhs.get());
                 TyKind hi = validate_expr(expr->kind.rhs.get());
                 expect_compat(lo, hi, expr->pos, "Range bounds must match");
@@ -220,12 +227,11 @@ private:
             }
             case ExprKind::Tag::ChannelSend: { // ch <- val
                 validate_expr(expr->kind.channel.get());
-                return validate_expr(expr->kind.send_val.get());
+                validate_expr(expr->kind.send_val.get());
+                return TyKind::Void;
             }
-            case ExprKind::Tag::Await: {      // await expr
-                return validate_expr(expr->kind.awaited.get());
-            }
-            case ExprKind::Tag::FnExpr: {     // fn(x:T)->T { }
+            case ExprKind::Tag::Await: return validate_expr(expr->kind.awaited.get());
+            case ExprKind::Tag::FnExpr: { // fn(x:T)->T { }
                 symb_tab.pushScope();
                 TyKind saved_ret = expected_ret_ty;
                 expected_ret_ty  = expr->kind.fn_ret_type;
@@ -234,27 +240,27 @@ private:
                     symb_tab.define(Symbol(param.first, param.second, IdentCtx::Param, expr->pos));
                 }
                 TyKind body_ty = validate_compound(expr->kind.fn_body, true);
-                if (expr->kind.fn_ret_type != TyKind::Void)
-                    expect_compat(expr->kind.fn_ret_type, body_ty, expr->pos,
-                                  "Lambda return type mismatch");
+                if (expr->kind.fn_ret_type != TyKind::Void) expect_compat(expr->kind.fn_ret_type, body_ty, expr->pos, "Lambda return type mismatch");
                 expected_ret_ty = saved_ret;
                 symb_tab.popScope();
                 return TyKind::FnType;
             }
-            case ExprKind::Tag::Match: {
+            case ExprKind::Tag::Match: { // similar to validate_match function
                 TyKind subject_ty = validate_expr(expr->kind.match_subject.get());
                 TyKind match_ret_ty = TyKind::Infer;
                 bool first_arm = true;
                 for (auto& arm : expr->kind.arms) {
                     symb_tab.pushScope();
-                    // Pattern check
-                    TyKind pattern_ty = validate_expr(arm.pattern.get());
-                    if (arm.pattern->kind.tag != ExprKind::Tag::Id || arm.pattern->kind.id.name() != "_") {
-                        expect_compat(subject_ty, pattern_ty, arm.pos, "Match pattern mismatch");
+                    bool is_wildcard = arm.pattern && arm.pattern->kind.tag == ExprKind::Tag::Id && arm.pattern->kind.id.name() == "_";
+                    if (!is_wildcard) {
+                        TyKind pattern_ty = validate_expr(arm.pattern.get());
+                        expect_compat(subject_ty, pattern_ty, arm.pos, "Match pattern type mismatch");
                     }
-                    // Body check
-                    TyKind arm_ty = arm.hasStmtBody() ? validate_stmt(arm.body_stmt.get()) 
-                                                    : validate_expr(arm.body.get());
+                    if (arm.guard) {
+                        TyKind guard_ty = validate_expr(arm.guard.value().get());
+                        expect_compat(TyKind::Bool, guard_ty, arm.pos, "Match guard must be bool");
+                    }
+                    TyKind arm_ty = arm.hasStmtBody() ? validate_stmt(arm.body_stmt.get()) : validate_expr(arm.body.get());
                     if (first_arm) {
                         match_ret_ty = arm_ty;
                         first_arm = false;
@@ -345,49 +351,35 @@ private:
 
     TyKind validate_pipe(Expr* expr) {
         TyKind lhs_ty = validate_expr(expr->kind.pipe_lhs.get());
-
         Expr* rhs = expr->kind.pipe_rhs.get();
         if (!rhs) return TyKind::Infer;
-
-        if (rhs->kind.tag != ExprKind::Tag::Call)
-            error("RHS of pipe operator must be a function call", expr->pos);
-
-        // Non-Id callees (field/scope pipe) → stub.
+        if (rhs->kind.tag != ExprKind::Tag::Call) error("RHS of pipe operator must be a function call", expr->pos);
         Expr* rhs_callee = rhs->kind.callee.get();
-        if (!rhs_callee || rhs_callee->kind.tag != ExprKind::Tag::Id)
-            return TyKind::Infer;
-
+        if (!rhs_callee || rhs_callee->kind.tag != ExprKind::Tag::Id) return TyKind::Infer;
         const std::string& fn_name = rhs_callee->kind.id.name();
         Symbol* sym = symb_tab.lookup(fn_name);
-        if (!sym)
-            error("Pipe: undefined function '" + fn_name + "'", rhs->pos);
-
-        if (sym->param_types.empty())
-            error("Pipe: function '" + fn_name +
-                  "' takes no arguments and cannot be piped into", rhs->pos);
-
+        if (!sym) error("Pipe: undefined function '" + fn_name + "'", rhs->pos);
+        if (sym->param_types.empty()) error("Pipe: function '" + fn_name + "' takes no arguments and cannot be piped into", rhs->pos);
         // First parameter receives the lhs value.
         expect_compat(sym->param_types[0], lhs_ty, expr->pos,
-                      "Pipe type mismatch: " + tyName(lhs_ty) +
-                      " cannot flow into first parameter of '" +
-                      fn_name + "' (" + tyName(sym->param_types[0]) + ")");
-
+            "Pipe type mismatch: " + tyName(lhs_ty) +
+            " cannot flow into first parameter of '" +
+            fn_name + "' (" + tyName(sym->param_types[0]) + ")");
         // Remaining explicit args cover parameters [1..N].
         auto& provided = rhs->kind.args;
         size_t expected_extra = sym->param_types.size() - 1;
         if (provided.size() != expected_extra)
             error("Pipe: '" + fn_name + "' expects " +
-                  std::to_string(expected_extra) +
-                  " additional argument(s), got " +
-                  std::to_string(provided.size()), rhs->pos);
-
+                std::to_string(expected_extra) +
+                " additional argument(s), got " +
+                std::to_string(provided.size()), rhs->pos);
         for (size_t i = 0; i < provided.size(); ++i)
         {
             TyKind actual = validate_expr(provided[i].get());
             expect_compat(sym->param_types[i + 1], actual,
-                          provided[i]->pos,
-                          "Pipe: argument " + std::to_string(i + 2) +
-                          " of '" + fn_name + "' type mismatch");
+                provided[i]->pos,
+                "Pipe: argument " + std::to_string(i + 2) +
+                " of '" + fn_name + "' type mismatch");
         }
         return sym->type;
     }
@@ -396,10 +388,7 @@ private:
         TyKind subject_ty = validate_expr(stmt->kind.match_subject.get());
         for (auto& arm : stmt->kind.match_arms) {
             symb_tab.pushScope();
-            // Validate pattern matches subject
-            bool is_wildcard = arm.pattern &&
-                               arm.pattern->kind.tag == ExprKind::Tag::Id &&
-                               arm.pattern->kind.id.name() == "_";
+            bool is_wildcard = arm.pattern && arm.pattern->kind.tag == ExprKind::Tag::Id && arm.pattern->kind.id.name() == "_";
             if (!is_wildcard)
             {
                 TyKind pattern_ty = validate_expr(arm.pattern.get());
@@ -411,14 +400,10 @@ private:
                 expect_compat(TyKind::Bool, guard_ty, arm.pos, "Match guard must be bool");
             }
             // Validate body (Statement version uses body_stmt)
-            if (arm.hasStmtBody()) {
-                validate_stmt(arm.body_stmt.get());
-            } else {
-                validate_expr(arm.body.get());
-            }
+            if (arm.hasStmtBody()) validate_stmt(arm.body_stmt.get());
+            else                   validate_expr(arm.body.get());
             symb_tab.popScope();
         }
-        // TODO: when match is used as an expression, verify all arm types agree.
         return TyKind::Void;
     }
 
@@ -439,26 +424,33 @@ private:
 
     TyKind validate_if(Stmt* stmt) {
         TyKind cond = validate_expr(stmt->kind.if_cond.get());
-        if (cond != TyKind::Bool) error("Condition must be Bool", stmt->pos);
+        expect_compat(TyKind::Bool, cond, stmt->pos, "if condition must be bool");
         validate_compound(stmt->kind.if_body, false);
         if (stmt->kind.else_or_else_if) validate_stmt(stmt->kind.else_or_else_if.get());
+        return TyKind::Void;
+    }
+
+    TyKind validate_spawn(Stmt* stmt) {
+        if (!stmt->kind.spawn_fn) return TyKind::Infer;
+        validate_stmt(stmt->kind.spawn_fn.get());
         return TyKind::Void;
     }
 
     TyKind validate_for(Stmt* stmt)
     {
         TyKind iter_ty = validate_expr(stmt->kind.for_iter.get());
-        // Derive element type from the iterator's collection type.
         TyKind elem_ty;
         switch (iter_ty) {
             case TyKind::I32:
             case TyKind::I64:
-            case TyKind::Array:
-                // Range and Array: element type is I32/Infer respectively.
-                // Range always produces I32 values; Array element type is not
-                // tracked yet so we use Infer rather than silently using I32.
-                elem_ty = (iter_ty == TyKind::Array) ? TyKind::Infer : TyKind::I32;
+                elem_ty = TyKind::I32;
                 break;
+            case TyKind::Array:
+                if (stmt->kind.for_iter && stmt->kind.for_iter->kind.tag == ExprKind::Tag::Id) {
+                    Symbol* s = symb_tab.lookup(stmt->kind.for_iter->kind.id.name());
+                    if (s && s->elem_ty != TyKind::Infer)
+                        elem_ty = s->elem_ty;
+                }
             case TyKind::Tensor:
                 elem_ty = TyKind::F32;   // scalar iteration over a tensor
                 break;
@@ -478,7 +470,7 @@ private:
     TyKind validate_while(Stmt* stmt) {
         if (stmt->kind.while_cond) {
             TyKind cond = validate_expr(stmt->kind.while_cond.get());
-            if (cond != TyKind::Bool) error("While condition must be Bool", stmt->pos);
+            expect_compat(TyKind::Bool, cond, stmt->pos, "while condition must be bool");
         }
         iteration_depth++;
         validate_compound(stmt->kind.while_body, false);
@@ -534,6 +526,6 @@ private:
     [[noreturn]]
     void error(const std::string& msg, Position pos) {
         throw std::runtime_error("[" + std::to_string(pos.line) + ":" + 
-                               std::to_string(pos.column) + "] " + msg);
+            std::to_string(pos.column) + "] " + msg);
     }
 };

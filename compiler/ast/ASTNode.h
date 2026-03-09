@@ -65,17 +65,10 @@ struct Ident
 {
     enum class Kind { Unqual, Qual } kind;
     IdentInfo info;                         // the leaf name
-    std::optional<IdentInfo> qualifier;     // present only for Qual
+    std::optional<IdentInfo> qualifier;
 
-    static Ident unqual(IdentInfo info)
-    {
-        return Ident{ Kind::Unqual, std::move(info), std::nullopt };
-    }
-
-    static Ident qual(IdentInfo qualifier, IdentInfo info)
-    {
-        return Ident{ Kind::Qual, std::move(info), std::move(qualifier) };
-    }
+    static Ident unqual(IdentInfo info) { return Ident{ Kind::Unqual, std::move(info), std::nullopt }; }
+    static Ident qual(IdentInfo qualifier, IdentInfo info) { return Ident{ Kind::Qual, std::move(info), std::move(qualifier) }; }
 
     const std::string& name()    const { return info.name; }
     TyKind             ty_kind() const { return info.ty_kind; }
@@ -98,15 +91,13 @@ struct Compound
 enum class BinOp
 {
     // arithmetic
-    Add, Sub, Mul, Div,
-    MatMul,         // @
+    Add, Sub, Mul, Div, MatMul,
     // comparison
     Eq, Neq, Lt, Gt, Lte, Gte,
     // logical
     And, Or,
     // assignment
-    Assign,
-    AddAssign, SubAssign, MulAssign, DivAssign,
+    Assign, AddAssign, SubAssign, MulAssign, DivAssign,
     // special
     Pipe,           // |>
     Range,          // ..
@@ -131,22 +122,10 @@ struct LitKind
     std::string str_val;
     bool        bool_val = false;
 
-    static LitKind makeInt(std::string v)
-    {
-        return LitKind{ Tag::Int, std::move(v), false };
-    }
-    static LitKind makeFloat(std::string v)
-    {
-        return LitKind{ Tag::Float, std::move(v), false };
-    }
-    static LitKind makeStr(std::string v)
-    {
-        return LitKind{ Tag::Str, std::move(v), false };
-    }
-    static LitKind makeBool(bool v)
-    {
-        return LitKind{ Tag::Bool, "", v };
-    }
+    static LitKind makeInt(std::string v) { return LitKind{ Tag::Int, std::move(v), false }; }
+    static LitKind makeFloat(std::string v) { return LitKind{ Tag::Float, std::move(v), false }; }
+    static LitKind makeStr(std::string v) { return LitKind{ Tag::Str, std::move(v), false }; }
+    static LitKind makeBool(bool v) { return LitKind{ Tag::Bool, "", v }; }
 };
 
 struct MatchArm
@@ -190,33 +169,29 @@ struct ExprKind
         StackLit,
         TupleLit,
     } tag;
+
     LitKind lit;
     Ident id{ Ident::unqual(IdentInfo{"", TyKind::Infer, IdentCtx::Ref, Position{}}) };
     BinOp   bin_op = BinOp::Add;
     ExprPtr lhs;
     ExprPtr rhs;
-
     UnaryOp unary_op = UnaryOp::Neg;
     ExprPtr operand;
     ExprPtr                callee;
     std::vector<ExprPtr>   args;
-    ExprPtr obj;
     ExprPtr index;
     ExprPtr     target;
     std::string member;
-
     ExprPtr condition;
     ExprPtr then_branch;
     ExprPtr else_branch;
     ExprPtr                match_subject;
     std::vector<MatchArm>  arms;
     Compound block;
-
     std::vector<std::string>               fn_generic_names;
     std::vector<std::pair<std::string, TyKind>> fn_params;
     TyKind                                 fn_ret_type = TyKind::Void;
     Compound                               fn_body;
-
     ExprPtr pipe_lhs;
     ExprPtr pipe_rhs;
     ExprPtr channel;
@@ -224,7 +199,6 @@ struct ExprKind
     ExprPtr awaited;
     ExprPtr grad_loss;
     ExprPtr grad_params;
-
     std::vector<ExprPtr>  elements;     // array / set / queue / stack / tuple
     std::vector<std::vector<ExprPtr>> rows;   // tensor  (row-major)
     std::optional<GenericParams> generic_params;
@@ -244,7 +218,6 @@ struct ExprKind
         }
     }
 
-    // Returns the secondary / payload expression.
     Expr* value() const
     {
         switch (tag)
@@ -265,7 +238,6 @@ struct ExprKind
         // Id: the identifier string
         if (tag == Tag::Id) return id.name();
         // For everything else this is a programming error.
-        // Return an empty static string so callers don't crash.
         static const std::string empty;
         return empty;
     }
@@ -371,10 +343,7 @@ struct Func
     std::vector<Ident>       params;
     Compound    body;
     Func(Ident id, std::vector<Ident> p, Compound b)
-        : ident(std::move(id))
-        , params(std::move(p))
-        , body(std::move(b))
-    {}
+        : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
 };
 
 struct StmtKind
@@ -405,19 +374,15 @@ struct StmtKind
     Compound if_body;
     StmtPtr  else_or_else_if;   // Else or If stmt, nullptr if absent
     Compound else_body;
-
     ExprPtr  while_cond;    // nullptr = infinite loop
     Compound while_body;
     std::string for_var;
     ExprPtr     for_iter;
     Compound    for_body;
-
     ExprPtr               match_subject;
     std::vector<MatchArm> match_arms;
-
     std::string import_path;
     std::string import_alias;   // "" if no alias
-
     StmtPtr spawn_fn;
     Compound compound;
     ExprPtr expr;
