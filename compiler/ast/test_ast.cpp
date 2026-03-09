@@ -563,5 +563,61 @@ int main() {
         analyzer.validate(prog); 
     });
 
+    run_test("Struct Test Invalid (I32 -> UserDef)", []() {
+        SemanticAnalyzer analyzer;
+        Program program;
+
+        // 1. Define: struct Layer { id: i32, weight: Tensor }
+        // Note: StructField constructor is (name, ty, pos)
+        std::vector<StructField> fields;
+        fields.emplace_back("id", TyKind::I32, Position{1, 10});
+        fields.emplace_back("weight", TyKind::Tensor, Position{1, 20});
+
+        auto struct_stmt = std::make_unique<Stmt>(
+            StmtKind::makeStruct("Layer", std::move(fields)),
+            Position{1, 1}
+        );
+        program.addStmt(std::move(struct_stmt));
+
+        // 2. Define: let x: Layer = 0 (using a dummy literal for RHS)
+        // Ident constructor: IdentInfo(n, t, c, p, user_ty)
+        IdentInfo x_info("x", TyKind::UserDef, IdentCtx::Def, Position{2, 5}, "Layer");
+        Ident x_ident = Ident::unqual(std::move(x_info));
+
+        auto dummy_rhs = std::make_unique<Expr>(
+            ExprKind::makeLit(LitKind::makeInt("0")), 
+            Position{2, 15}
+        );
+
+        auto let_stmt = std::make_unique<Stmt>(
+            StmtKind::makeLet(std::move(x_ident), std::move(dummy_rhs)),
+            Position{2, 1}
+        );
+        program.addStmt(std::move(let_stmt));
+
+        // 3. Usage Expression: x.weight
+        // First, create the target "x" (IdentCtx::Ref)
+        auto target_id_expr = std::make_unique<Expr>(
+            ExprKind::makeId("x", TyKind::UserDef, IdentCtx::Ref, Position{3, 1}),
+            Position{3, 1}
+        );
+        // Manually set the user_type_name for the reference so the analyzer knows it's a Layer
+        target_id_expr->kind.id.set_user_type_name("Layer");
+
+        // Create the Field access expression
+        auto field_expr = std::make_unique<Expr>(
+            ExprKind::makeField(std::move(target_id_expr), "weight"),
+            Position{3, 1}
+        );
+
+        auto expr_stmt = std::make_unique<Stmt>(
+            StmtKind::makeExpr(std::move(field_expr)),
+            Position{3, 1}
+        );
+        program.addStmt(std::move(expr_stmt));
+
+        analyzer.validate(program); 
+    });
+
     return 0;
 }

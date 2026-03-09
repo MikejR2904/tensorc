@@ -13,6 +13,7 @@ struct Symbol {
     TyKind      type;
     IdentCtx    ctx;
     Position    pos;
+    std::string user_type_name; // UserDef struct name
     std::vector<int> shape;
     std::vector<TyKind> param_types;
     TyKind elem_ty = TyKind::Infer;
@@ -86,6 +87,19 @@ public:
     }
 
     size_t depth() const { return scopes.size(); }
+
+    bool existsInCurrentScope(const std::string& name) {
+        if (scopes.empty()) return false;
+        return scopes.back()->resolve(name) != nullptr;
+    }
+
+    Symbol* lookupOrThrow(const std::string& name, const Position& pos) {
+        Symbol* sym = lookup(name);
+        if (!sym) {
+            throw std::runtime_error("[" + std::to_string(pos.line) + ":" + std::to_string(pos.column) + "] Undefined identifier: " + name);
+        }
+        return sym;
+    }
 
 private:
     std::vector<std::unique_ptr<Scope>> scopes;

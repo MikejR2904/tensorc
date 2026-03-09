@@ -6,11 +6,24 @@
 #include <string>
 #include <iostream>
 
+struct FieldType {
+    TyKind kind;
+    std::string user_name;
+};
+
+struct StructDef {
+    std::string name;
+    std::unordered_map<std::string, FieldType> fields;
+    
+};
+
 class SemanticAnalyzer {
 public:
     SemanticAnalyzer() : symb_tab() {}
     void validate(Program& program) {
         try {
+            for (auto& stmt : program.stmts)
+                register_top_level(stmt.get());
             for (auto& stmt : program.stmts) {
                 validate_stmt(stmt.get());
             }
@@ -22,8 +35,41 @@ public:
 
 private:
     SymbolTable symb_tab;
+    std::unordered_map<std::string, StructDef> struct_registry;
     TyKind expected_ret_ty = TyKind::Void;
     int iteration_depth = 0;
+
+    void register_struct(const StructDef& def)
+    {
+        struct_registry[def.name] = def;
+    }
+
+    void register_top_level(Stmt* stmt)
+    {
+        if (stmt->kind.tag == StmtKind::Tag::Struct)
+        {
+            StructDef def;
+            def.name = stmt->kind.struct_name;
+            for (auto& f : stmt->kind.struct_fields)
+                def.fields[f.name] = FieldType{ f.ty, f.user_type_name };
+            register_struct(def);
+        }
+        if (stmt->kind.tag == StmtKind::Tag::Func)
+        {
+            auto& func = stmt->kind.func.value();
+            std::vector<TyKind> p_tys;
+            for (auto& p : func.params)
+                p_tys.push_back(p.ty_kind());
+            symb_tab.define(
+                Symbol(func.ident.name(),
+                    func.ident.ty_kind(),
+                    IdentCtx::FuncDef,
+                    func.ident.pos(),
+                    {},
+                    p_tys));
+        }
+    }
+
     // --- Statement Validation ---
     TyKind validate_stmt(Stmt* stmt) {
         if (!stmt) return TyKind::Void;
@@ -83,14 +129,23 @@ private:
         if (var_ty == TyKind::Array && stmt->kind.let_expr) {
             auto& elems = stmt->kind.let_expr->kind.elements;
             if (!elems.empty()) {
-                elem_ty = elems[0]->kind.lit.tag == LitKind::Tag::Int   ? TyKind::I32  :
-                        elems[0]->kind.lit.tag == LitKind::Tag::Float  ? TyKind::F32  :
-                        elems[0]->kind.lit.tag == LitKind::Tag::Bool   ? TyKind::Bool :
-                        elems[0]->kind.lit.tag == LitKind::Tag::Str    ? TyKind::Str  :
-                        TyKind::Infer;
+                if (elems[0]->kind.tag == ExprKind::Tag::Lit) {
+                    switch (elems[0]->kind.lit.tag) {
+                        case LitKind::Tag::Int:   elem_ty = TyKind::I32;  break;
+                        case LitKind::Tag::Float: elem_ty = TyKind::F32;  break;
+                        case LitKind::Tag::Bool:  elem_ty = TyKind::Bool; break;
+                        case LitKind::Tag::Str:   elem_ty = TyKind::Str;  break;
+                        default:                  elem_ty = TyKind::Infer; break;
+                    }
+                } else {
+                    // Non-literal first element (Id, Call, Binary…) — resolve normally.
+                    elem_ty = validate_expr(elems[0].get());
+                }
             }
         }
         Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos, shape);
+        if (var_ty == TyKind::UserDef)
+            sym.user_type_name = stmt->kind.let_ident.type_name();
         sym.elem_ty = elem_ty;
         symb_tab.define(sym);
         return var_ty;
@@ -102,7 +157,9 @@ private:
             p_tys.push_back(p.ty_kind());
         }
         // Register function name in current scope
-        symb_tab.define(Symbol(func.ident.name(), func.ident.ty_kind(), IdentCtx::FuncDef, func.ident.pos(), {}, p_tys));
+        // symb_tab.define(Symbol(func.ident.name(), func.ident.ty_kind(), IdentCtx::FuncDef, func.ident.pos(), {}, p_tys));
+        if (!symb_tab.existsInCurrentScope(func.ident.name()))
+            symb_tab.define(Symbol(func.ident.name(), func.ident.ty_kind(), IdentCtx::FuncDef, func.ident.pos(), {}, p_tys));
         symb_tab.pushScope();
         TyKind old_expect = expected_ret_ty;
         expected_ret_ty = func.ident.ty_kind();
@@ -132,15 +189,19 @@ private:
                 if (!s) error("Undefined identifier: " + expr->kind.id.name(), expr->pos);
                 // Update AST node with the resolved type for the code generator
                 expr->kind.id.set_ty_kind(s->type);
+                if (s->type == TyKind::UserDef) {
+                    expr->kind.resolved_user_type = s->user_type_name;
+                }
                 return s->type;
             }
             case ExprKind::Tag::Unary: return validate_unary(expr->kind.unary_op, expr->kind.operand.get(), expr->pos);
             case ExprKind::Tag::Binary: return validate_bin_op(expr->kind.bin_op, expr->kind.lhs.get(), expr->kind.rhs.get(), expr->pos);
-            case ExprKind::Tag::Assign:
+            case ExprKind::Tag::Assign: {
                 TyKind l = validate_expr(expr->kind.lhs.get());
                 TyKind r = validate_expr(expr->kind.rhs.get());
                 expect_compat(l, r, expr->pos, "Assignment type mismatch");
                 return TyKind::Void;
+            }
             case ExprKind::Tag::Call: return validate_call(expr);
             case ExprKind::Tag::Pipe: return validate_pipe(expr);
             case ExprKind::Tag::Grad: { // grad(loss, params)
@@ -203,21 +264,42 @@ private:
             case ExprKind::Tag::Index: { // expr[i]
                 TyKind obj = validate_expr(expr->kind.target.get());
                 TyKind idx = validate_expr(expr->kind.index.get());
-                if (idx != TyKind::I32 && idx != TyKind::I64) error("Index must be integer", expr->pos);
+                if (idx != TyKind::I32 && idx != TyKind::I64 && idx != TyKind::Infer) error("Index subscript must be integer", expr->pos);
                 if (obj != TyKind::Tensor) return TyKind::Infer;
                 if (expr->kind.target->kind.tag == ExprKind::Tag::Id) {
                     Symbol* s = symb_tab.lookup(expr->kind.target->kind.id.name());
                     if (s && !s->shape.empty()) return (s->shape.size() == 1) ? TyKind::F32 : TyKind::Tensor;
                 }
+                return TyKind::F32;
             }
             case ExprKind::Tag::Field: { // expr.member
-                validate_expr(expr->kind.target.get());
-                // TODO: Look up member in obj_ty's definition
+                TyKind target_ty = validate_expr(expr->kind.target.get());
+                std::string struct_name;
+                if (expr->kind.target->kind.tag == ExprKind::Tag::Id)
+                {
+                    const std::string& var_name = expr->kind.target->kind.id.name();
+                    Symbol* s = symb_tab.lookup(var_name);
+                    if (!s) error("Undefined identifier '" + var_name + "'", expr->pos);
+                    // Non-UserDef dot access (e.g. future tensor.shape) — stub.
+                    if (s->type != TyKind::UserDef) return TyKind::Infer;
+                    else if (target_ty == TyKind::UserDef) {
+                        struct_name = expr->kind.target->kind.resolved_user_type;
+                        return TyKind::Infer; 
+                    } else return TyKind::Infer; 
+                    // UserDef without a registered struct — registry not yet populated.
+                    if (struct_name.empty()) return TyKind::Infer;
+                    auto it = struct_registry.find(struct_name);
+                    if (it == struct_registry.end()) error("Unknown struct type '" + struct_name + "'", expr->pos);
+                    auto fit = it->second.fields.find(expr->kind.member);
+                    if (fit == it->second.fields.end()) error("Struct '" + struct_name + "' has no field '" + expr->kind.member + "'", expr->pos);
+                    expr->kind.resolved_user_type = fit->second.user_name;
+                    return fit->second.kind;
+                }
                 return TyKind::Infer;
             }
             case ExprKind::Tag::Scope: { // expr::member
                 validate_expr(expr->kind.target.get());
-                return TyKind::Infer;
+                return TyKind::Infer; // TODO: ImportRegistry
             }
             case ExprKind::Tag::Range: { // lo..hi
                 TyKind lo = validate_expr(expr->kind.lhs.get());
@@ -431,15 +513,18 @@ private:
     }
 
     TyKind validate_spawn(Stmt* stmt) {
-        if (!stmt->kind.spawn_fn) return TyKind::Infer;
+        if (!stmt->kind.spawn_fn) return TyKind::Void;
+        int saved = iteration_depth;
+        iteration_depth = 0;
         validate_stmt(stmt->kind.spawn_fn.get());
+        iteration_depth = saved;
         return TyKind::Void;
     }
 
     TyKind validate_for(Stmt* stmt)
     {
         TyKind iter_ty = validate_expr(stmt->kind.for_iter.get());
-        TyKind elem_ty;
+        TyKind elem_ty = TyKind::Infer;
         switch (iter_ty) {
             case TyKind::I32:
             case TyKind::I64:
@@ -451,6 +536,7 @@ private:
                     if (s && s->elem_ty != TyKind::Infer)
                         elem_ty = s->elem_ty;
                 }
+                break;
             case TyKind::Tensor:
                 elem_ty = TyKind::F32;   // scalar iteration over a tensor
                 break;
@@ -492,8 +578,7 @@ private:
         if (expected == TyKind::Infer || actual == TyKind::Infer) return;
         if (expected == TyKind::Generic || actual == TyKind::Generic) return;
         if (expected != actual) {
-            error(ctx + " (Expected " + tyName(expected) + 
-                  ", got " + tyName(actual) + ")", pos);
+            error(ctx + " (expected " + tyName(expected) + ", got " + tyName(actual) + ")", pos);
         }
     }
 

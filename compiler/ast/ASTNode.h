@@ -57,8 +57,9 @@ struct IdentInfo
     TyKind      ty_kind;
     IdentCtx    ctx;
     Position    pos;
-    IdentInfo(std::string n, TyKind t, IdentCtx c, Position p)
-        : name(std::move(n)), ty_kind(t), ctx(c), pos(p) {}
+    std::optional<std::string> user_type_name;
+    IdentInfo(std::string n, TyKind t, IdentCtx c, Position p, std::optional<std::string> user_ty = std::nullopt)
+        : name(std::move(n)), ty_kind(t), ctx(c), pos(p), user_type_name(std::move(user_ty)) {}
 };
 
 struct Ident
@@ -76,6 +77,13 @@ struct Ident
     const Position&    pos()     const { return info.pos; }
     void set_ty_kind(TyKind t) { info.ty_kind = t; }
     void set_ctx(IdentCtx c)   { info.ctx = c; }
+    const std::string& type_name() const
+    {
+        if (info.ty_kind == TyKind::UserDef && info.user_type_name.has_value()) return *info.user_type_name;
+        static const std::string empty;
+        return empty;
+    }
+    void set_user_type_name(std::string name) { info.user_type_name = std::move(name); }
 };
 
 struct Compound
@@ -182,6 +190,7 @@ struct ExprKind
     ExprPtr index;
     ExprPtr     target;
     std::string member;
+    std::string resolved_user_type;
     ExprPtr condition;
     ExprPtr then_branch;
     ExprPtr else_branch;
@@ -346,6 +355,16 @@ struct Func
         : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
 };
 
+struct StructField
+{
+    std::string name;
+    TyKind      ty;
+    Position    pos;
+    std::string user_type_name;
+    StructField(std::string n, TyKind t, Position p)
+        : name(std::move(n)), ty(t), pos(std::move(p)) {};
+};
+
 struct StmtKind
 {
     enum class Tag
@@ -364,6 +383,7 @@ struct StmtKind
         Expr,       // expression statement
         Break,      // break
         Continue,   // continue
+        Struct,     // struct
     } tag;
 
     Ident   let_ident{ Ident::unqual(IdentInfo{"", TyKind::Infer, IdentCtx::Def, Position{}}) };
@@ -386,6 +406,16 @@ struct StmtKind
     StmtPtr spawn_fn;
     Compound compound;
     ExprPtr expr;
+    std::string              struct_name;
+    std::vector<StructField> struct_fields;
+
+    static StmtKind makeStruct(std::string name, std::vector<StructField> fields)
+    {
+        StmtKind sk; sk.tag = Tag::Struct;
+        sk.struct_name   = std::move(name);
+        sk.struct_fields = std::move(fields);
+        return sk;
+    }
 
     static StmtKind makeLet(Ident id, ExprPtr expr) {
         StmtKind sk; sk.tag = Tag::Let;
