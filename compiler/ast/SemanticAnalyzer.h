@@ -129,23 +129,19 @@ private:
         if (var_ty == TyKind::Array && stmt->kind.let_expr) {
             auto& elems = stmt->kind.let_expr->kind.elements;
             if (!elems.empty()) {
-                if (elems[0]->kind.tag == ExprKind::Tag::Lit) {
-                    switch (elems[0]->kind.lit.tag) {
-                        case LitKind::Tag::Int:   elem_ty = TyKind::I32;  break;
-                        case LitKind::Tag::Float: elem_ty = TyKind::F32;  break;
-                        case LitKind::Tag::Bool:  elem_ty = TyKind::Bool; break;
-                        case LitKind::Tag::Str:   elem_ty = TyKind::Str;  break;
-                        default:                  elem_ty = TyKind::Infer; break;
-                    }
-                } else {
-                    // Non-literal first element (Id, Call, Binary…) — resolve normally.
-                    elem_ty = validate_expr(elems[0].get());
+                elem_ty = validate_expr(elems[0].get());
+                for (size_t i = 1; i < elems.size(); ++i) {
+                    TyKind current_ty = validate_expr(elems[i].get());
+                    expect_compat(elem_ty, current_ty, elems[i]->pos, "Array elements must have consistent types");
                 }
             }
         }
         Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos, shape);
         if (var_ty == TyKind::UserDef)
             sym.user_type_name = stmt->kind.let_ident.type_name();
+            if (struct_registry.find(sym.user_type_name) == struct_registry.end()) {
+                error("Undefined struct type '" + sym.user_type_name + "'", stmt->pos);
+            }
         sym.elem_ty = elem_ty;
         symb_tab.define(sym);
         return var_ty;
@@ -156,10 +152,6 @@ private:
         for (auto& p : func.params) {
             p_tys.push_back(p.ty_kind());
         }
-        // Register function name in current scope
-        // symb_tab.define(Symbol(func.ident.name(), func.ident.ty_kind(), IdentCtx::FuncDef, func.ident.pos(), {}, p_tys));
-        if (!symb_tab.existsInCurrentScope(func.ident.name()))
-            symb_tab.define(Symbol(func.ident.name(), func.ident.ty_kind(), IdentCtx::FuncDef, func.ident.pos(), {}, p_tys));
         symb_tab.pushScope();
         TyKind old_expect = expected_ret_ty;
         expected_ret_ty = func.ident.ty_kind();
@@ -280,22 +272,18 @@ private:
                     const std::string& var_name = expr->kind.target->kind.id.name();
                     Symbol* s = symb_tab.lookup(var_name);
                     if (!s) error("Undefined identifier '" + var_name + "'", expr->pos);
-                    // Non-UserDef dot access (e.g. future tensor.shape) — stub.
                     if (s->type != TyKind::UserDef) return TyKind::Infer;
-                    else if (target_ty == TyKind::UserDef) {
-                        struct_name = expr->kind.target->kind.resolved_user_type;
-                        return TyKind::Infer; 
-                    } else return TyKind::Infer; 
-                    // UserDef without a registered struct — registry not yet populated.
-                    if (struct_name.empty()) return TyKind::Infer;
-                    auto it = struct_registry.find(struct_name);
-                    if (it == struct_registry.end()) error("Unknown struct type '" + struct_name + "'", expr->pos);
-                    auto fit = it->second.fields.find(expr->kind.member);
-                    if (fit == it->second.fields.end()) error("Struct '" + struct_name + "' has no field '" + expr->kind.member + "'", expr->pos);
-                    expr->kind.resolved_user_type = fit->second.user_name;
-                    return fit->second.kind;
+                    struct_name = s->user_type_name;
+                } else if (expr->kind.target->kind.tag == ExprKind::Tag::Field) {
+                    struct_name = expr->kind.target->kind.resolved_user_type;
                 }
-                return TyKind::Infer;
+                if (struct_name.empty()) return TyKind::Infer;
+                auto it = struct_registry.find(struct_name);
+                if (it == struct_registry.end()) error("Unknown struct type '" + struct_name + "'", expr->pos);
+                auto fit = it->second.fields.find(expr->kind.member);
+                if (fit == it->second.fields.end()) error("Struct '" + struct_name + "' has no field '" + expr->kind.member + "'", expr->pos);
+                expr->kind.resolved_user_type = fit->second.user_name;
+                return fit->second.kind;
             }
             case ExprKind::Tag::Scope: { // expr::member
                 validate_expr(expr->kind.target.get());
