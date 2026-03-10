@@ -47,7 +47,7 @@ private:
             StructDef def;
             def.name = stmt->kind.struct_name;
             for (auto& f : stmt->kind.struct_fields) {
-                TypePtr field_ty = Type::fromTyKind(f.ty, f.user_type_name, "", nullptr, {});
+                TypePtr field_ty = Type::fromTyKind(f.ty, f.user_type_name);
                 def.fields[f.name] = std::move(field_ty);
             }
             register_struct(def);
@@ -115,11 +115,17 @@ private:
             var_ty = rhs_ty;
             stmt->kind.let_ident.set_ty_kind(rhs_ty ? tkFromType(rhs_ty) : TyKind::Infer);
         } else {
-            var_ty = Type::fromTyKind(ann_k, stmt->kind.let_ident.user_type_name(), "", (ann_k == TyKind::Array  ||
-                ann_k == TyKind::Tensor ||
-                ann_k == TyKind::Set    ||
-                ann_k == TyKind::Queue  ||
-                ann_k == TyKind::Stack) ? rhs_ty : nullptr);
+            bool propagate_elem = (ann_k == TyKind::Array  ||
+                                   ann_k == TyKind::Tensor ||
+                                   ann_k == TyKind::Set    ||
+                                   ann_k == TyKind::Queue  ||
+                                   ann_k == TyKind::Stack);
+            std::vector<TypePtr> inner;
+            if (propagate_elem && rhs_ty) inner.push_back(rhs_ty);
+            var_ty = Type::fromTyKind(
+                ann_k,
+                stmt->kind.let_ident.user_type_name(),  // struct name if UserDef
+                std::move(inner));
             expect_compat(var_ty, rhs_ty, stmt->pos, "Variable '" + stmt->kind.let_ident.name() + "' type mismatch");
         }
         symb_tab.define(Symbol(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos));
