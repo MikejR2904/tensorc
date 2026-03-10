@@ -44,6 +44,8 @@ private:
     StmtPtr parseSpawn();
     StmtPtr parseBreak();
     StmtPtr parseContinue();
+    StmtPtr parseStruct();
+
     Compound parseCompound();
     ExprPtr parseExpr();
     ExprPtr parsePipe();            // |>      lowest

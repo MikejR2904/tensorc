@@ -53,6 +53,8 @@ enum class TokenKind
     KW_IMPORT,
     KW_FROM,
     KW_AS,
+    KW_IN,
+    KW_STRUCT,
 
     // arithmetic operators
     PLUS,             // +

@@ -76,6 +76,7 @@ StmtPtr Parser::parseStatement()
         case TokenKind::KW_SPAWN:  return parseSpawn();
         case TokenKind::KW_BREAK:    return parseBreak();
         case TokenKind::KW_CONTINUE: return parseContinue();
+        case TokenKind::KW_STRUCT:   return parseStruct();
         default:
         {
             // expression statement
@@ -116,7 +117,8 @@ Compound Parser::parseCompound()
             check(TokenKind::KW_IMPORT) ||
             check(TokenKind::KW_SPAWN)  ||
             check(TokenKind::KW_BREAK)  ||
-            check(TokenKind::KW_CONTINUE);
+            check(TokenKind::KW_CONTINUE) ||
+            check(TokenKind::KW_STRUCT);
         if (!is_stmt_start)
         {
             ExprPtr e = parseExpr();
@@ -152,8 +154,10 @@ StmtPtr Parser::parseLet()
     advance();
     // optional type annotation  : T
     TyKind ty = TyKind::Infer;
+    std::string user_type_name;
     if (match(TokenKind::COLON))
         ty = parseType();
+        if (ty == TyKind::UserDef) user_type_name = previous.value;
     expect(TokenKind::ASSIGN, "expected '=' in let statement");
     StmtKind k;
     k.tag       = StmtKind::Tag::Let;
@@ -347,6 +351,33 @@ StmtPtr Parser::parseContinue()
     k.tag = StmtKind::Tag::Continue;
     consumeOptionalSemicolon();
     return makeStmt(std::move(k), p);
+}
+
+StmtPtr Parser::parseStruct()
+{
+    Position p = current.pos;
+    expect(TokenKind::KW_STRUCT, "expected 'struct'");
+    if (!check(TokenKind::IDENTIFIER))
+        throw error("expected struct name after 'struct'");
+    std::string struct_name = current.value;
+    advance();
+    expect(TokenKind::LBRACE, "expected '{' after struct name");
+    std::vector<StructField> fields;
+    while (!check(TokenKind::RBRACE) && !check(TokenKind::EOF_TOKEN))
+    {
+        if (!check(TokenKind::IDENTIFIER))
+            throw error("expected field name in struct");
+        std::string field_name = current.value;
+        Position    field_pos  = current.pos;
+        advance();
+        expect(TokenKind::COLON, "expected ':' after field name");
+        TyKind field_ty = parseType();
+        fields.emplace_back(std::move(field_name), field_ty, field_pos);
+        match(TokenKind::COMMA);
+    }
+    expect(TokenKind::RBRACE, "expected '}' to close struct");
+    consumeOptionalSemicolon();
+    return makeStmt(StmtKind::makeStruct(std::move(struct_name), std::move(fields)), p);
 }
 
 ExprPtr Parser::parseExpr()   { return parsePipe(); }
@@ -573,7 +604,6 @@ ExprPtr Parser::parsePostfix()
             expect(TokenKind::RBRACKET, "expected ']' after index");
             ExprKind k;
             k.tag   = ExprKind::Tag::Index;
-            k.obj   = std::move(expr);
             k.index = std::move(idx);
             expr    = makeExpr(std::move(k), p);
         }
@@ -964,8 +994,10 @@ TyKind Parser::parseType()
         case TokenKind::KW_FN:     advance(); return TyKind::FnType;
         case TokenKind::IDENTIFIER:
         {
+            const std::string& id = current.value;
             advance();
-            return TyKind::Generic;   // T, U etc — name is on previous.value
+            bool is_generic = (id.size() == 1 && std::isupper((unsigned char)id[0]));
+            return is_generic ? TyKind::Generic : TyKind::UserDef;
         }
         default:
             throw error("expected type annotation");

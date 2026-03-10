@@ -58,6 +58,8 @@ std::string kindToString(TokenKind k) {
         case TokenKind::KW_IMPORT:    return "KW_IMPORT";
         case TokenKind::KW_FROM:      return "KW_FROM";
         case TokenKind::KW_AS:        return "KW_AS";
+        case TokenKind::KW_IN:        return "KW_IN";
+        case TokenKind::KW_STRUCT:    return "KW_STRUCT";
 
         // Arithmetic
         case TokenKind::PLUS:         return "PLUS";
@@ -126,6 +128,8 @@ int main() {
         let set1 = Set[0.1, 0.2, 0.3]
         let queue2 = Queue[0.3, 0.5, 0.2]
         let map3 = Map{"k1": 0.32, "k2": 100}
+
+        struct Point { x: f32, y: f32 }
     )";
 
     Lexer lexer(code);

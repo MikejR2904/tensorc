@@ -7,34 +7,41 @@
 #include <optional>
 #include <stdexcept>
 #include "ASTNode.h"
+#include "Type.h"
 
 struct Symbol {
     std::string name;
-    TyKind      type;
+    TypePtr      type;
     IdentCtx    ctx;
     Position    pos;
-    std::string user_type_name; // UserDef struct name
-    std::vector<int> shape;
-    std::vector<TyKind> param_types;
-    TyKind elem_ty = TyKind::Infer;
-    std::optional<GenericParams> tensor_info;
-    bool is_const = false;
     bool is_parallel_safe = true; 
-    Symbol(std::string n, TyKind t, IdentCtx c, Position p, std::vector<int> s = {}, std::vector<TyKind> params = {})
-        : name(std::move(n)), type(t), ctx(c), pos(p), shape(std::move(s)), param_types(std::move(params)) {}
+    Symbol(std::string n, TypePtr t, IdentCtx c, Position p = {}) : name(std::move(n)), type(t), ctx(c), pos(p) {}
+    bool is_infer() const { return !type || type->is_infer(); }
+    const std::vector<int>& shape() const {
+        static const std::vector<int> empty;
+        return (type && type->kind == Type::Kind::Tensor) ? type->shape : empty;
+    }
+    const std::string& struct_name() const {
+        static const std::string empty;
+        return (type && type->kind == Type::Kind::Named) ? type->type_name : empty;
+    }
+    std::vector<TypePtr> param_types() const {
+        if (type && type->kind == Type::Kind::Fn) return type->param_types();
+        return {};
+    }
+    TypePtr ret_type() const {
+        if (type && type->kind == Type::Kind::Fn) return type->ret_type();
+        return Type::infer();
+    }
 };
 
 class Scope {
 public:
-    // Returns nullptr if symbol already exists (shadowing/redefinition check)
     Symbol* define(const Symbol& sym) {
-        if (symbols.find(sym.name) != symbols.end()) {
-            return nullptr; 
-        }
+        if (symbols.count(sym.name)) return nullptr; 
         auto [it, _] = symbols.emplace(sym.name, std::make_unique<Symbol>(sym));
         return it->second.get();
     }
-
     Symbol* resolve(const std::string& name) {
         auto it = symbols.find(name);
         if (it != symbols.end()) return it->second.get();
@@ -47,26 +54,19 @@ private:
 
 class SymbolTable {
 public:
-    SymbolTable() {
-        pushScope();
-    }
-
-    void pushScope() {
-        scopes.push_back(std::make_unique<Scope>());
-    }
-
+    SymbolTable() { pushScope(); }
+    void pushScope() { scopes.push_back(std::make_unique<Scope>()); }
     void popScope() {
         if (scopes.size() > 1) {
             scopes.pop_back();
         }
     }
-
     Symbol* define(const Symbol& sym) {
         Symbol* created = scopes.back()->define(sym);
         if (!created) {
             throw std::runtime_error("[" + std::to_string(sym.pos.line) + ":" + 
-                                   std::to_string(sym.pos.column) + 
-                                   "] Redefinition of identifier: " + sym.name);
+                std::to_string(sym.pos.column) + 
+                "] Redefinition of identifier: " + sym.name);
         }
         return created;
     }
@@ -74,9 +74,7 @@ public:
     Symbol* lookup(const std::string& name) {
         // Reverse iterate through the stack (closest scope first)
         for (auto it = scopes.rbegin(); it != scopes.rend(); ++it) {
-            if (Symbol* sym = (*it)->resolve(name)) {
-                return sym;
-            }
+            if (Symbol* sym = (*it)->resolve(name)) return sym;
         }
         return nullptr;
     }
@@ -87,19 +85,6 @@ public:
     }
 
     size_t depth() const { return scopes.size(); }
-
-    bool existsInCurrentScope(const std::string& name) {
-        if (scopes.empty()) return false;
-        return scopes.back()->resolve(name) != nullptr;
-    }
-
-    Symbol* lookupOrThrow(const std::string& name, const Position& pos) {
-        Symbol* sym = lookup(name);
-        if (!sym) {
-            throw std::runtime_error("[" + std::to_string(pos.line) + ":" + std::to_string(pos.column) + "] Undefined identifier: " + name);
-        }
-        return sym;
-    }
 
 private:
     std::vector<std::unique_ptr<Scope>> scopes;

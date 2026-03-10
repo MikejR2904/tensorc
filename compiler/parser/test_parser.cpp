@@ -24,353 +24,150 @@
 //  Mirrors Cortex's AstDebug trait.
 // ─────────────────────────────────────────────
 
-static std::string indent(int d)
-{
-    return std::string(d * 2, ' ');
-}
-
-static std::string tyKindStr(TyKind t)
-{
-    switch (t)
-    {
-        case TyKind::I32:    return "i32";
-        case TyKind::I64:    return "i64";
-        case TyKind::F32:    return "f32";
-        case TyKind::F64:    return "f64";
-        case TyKind::Bool:   return "bool";
-        case TyKind::Str:    return "str";
-        case TyKind::Void:   return "void";
-        case TyKind::Tensor: return "Tensor";
-        case TyKind::Map:    return "Map";
-        case TyKind::Set:    return "Set";
-        case TyKind::Queue:  return "Queue";
-        case TyKind::Stack:  return "Stack";
-        case TyKind::Tuple:  return "Tuple";
-        case TyKind::Array:  return "Array";
-        case TyKind::FnType: return "fn(...)";
-        case TyKind::Generic:return "Generic";
-        case TyKind::Infer:  return "<infer>";
-        case TyKind::UserDef:return "UserDef";
-        default:             return "?";
-    }
-}
-
-static std::string binOpStr(BinOp op)
-{
-    switch (op)
-    {
-        case BinOp::Add:       return "+";
-        case BinOp::Sub:       return "-";
-        case BinOp::Mul:       return "*";
-        case BinOp::Div:       return "/";
-        case BinOp::MatMul:    return "@";
-        case BinOp::Eq:        return "==";
-        case BinOp::Neq:       return "!=";
-        case BinOp::Lt:        return "<";
-        case BinOp::Gt:        return ">";
-        case BinOp::Lte:       return "<=";
-        case BinOp::Gte:       return ">=";
-        case BinOp::And:       return "&&";
-        case BinOp::Or:        return "||";
-        case BinOp::Assign:    return "=";
-        case BinOp::AddAssign: return "+=";
-        case BinOp::SubAssign: return "-=";
-        case BinOp::MulAssign: return "*=";
-        case BinOp::DivAssign: return "/=";
-        case BinOp::Pipe:      return "|>";
-        case BinOp::Range:     return "..";
-        default:               return "?";
-    }
-}
-
 // forward declaration
-static void printExpr(const Expr& e, int d);
-static void printCompound(const Compound& c, int d);
-static void printStmt(const Stmt& s, int d);
+class ASTPrinter {
+public:
+    std::ostream& out;
+    ASTPrinter(std::ostream& os) : out(os) {}
 
-static void printExpr(const Expr& e, int d)
-{
-    const ExprKind& k = e.kind;
-    switch (k.tag)
-    {
-        case ExprKind::Tag::Lit:
-            switch (k.lit.tag)
-            {
-                case LitKind::Tag::Int:
-                    std::cout << indent(d) << "IntLit(" << k.lit.str_val << ")\n"; break;
-                case LitKind::Tag::Float:
-                    std::cout << indent(d) << "FloatLit(" << k.lit.str_val << ")\n"; break;
-                case LitKind::Tag::Str:
-                    std::cout << indent(d) << "StrLit(\"" << k.lit.str_val << "\")\n"; break;
-                case LitKind::Tag::Bool:
-                    std::cout << indent(d) << "BoolLit(" << (k.lit.bool_val ? "true" : "false") << ")\n"; break;
-            }
-            break;
+    void print(const Program& program) {
+        out << "Program\n";
+        for (size_t i = 0; i < program.stmts.size(); ++i) {
+            bool isLast = (i == program.stmts.size() - 1);
+            printStmt(program.stmts[i].get(), "", isLast);
+        }
+    }
 
-        case ExprKind::Tag::Id:
-            std::cout << indent(d) << "Id(" << k.id.name()
-                      << ", " << tyKindStr(k.id.ty_kind()) << ")\n";
-            break;
+private:
+    // Helper for your TyKind names
+    std::string tyKindStr(TyKind t) {
+        switch (t) {
+            case TyKind::I32:    return "i32";
+            case TyKind::I64:    return "i64";
+            case TyKind::F32:    return "f32";
+            case TyKind::F64:    return "f64";
+            case TyKind::Bool:   return "bool";
+            case TyKind::Str:    return "str";
+            case TyKind::Void:   return "void";
+            case TyKind::Tensor: return "Tensor";
+            default:             return "Type";
+        }
+    }
 
-        case ExprKind::Tag::Binary:
-            std::cout << indent(d) << "Binary(" << binOpStr(k.bin_op) << ")\n";
-            if (k.lhs) printExpr(*k.lhs, d+1);
-            if (k.rhs) printExpr(*k.rhs, d+1);
-            break;
+    void printStmt(const Stmt* s, const std::string& prefix, bool isLast) {
+        if (!s) return;
 
-        case ExprKind::Tag::Assign:
-            std::cout << indent(d) << "Assign(" << binOpStr(k.bin_op) << ")\n";
-            if (k.lhs) printExpr(*k.lhs, d+1);
-            if (k.rhs) printExpr(*k.rhs, d+1);
-            break;
+        out << prefix << (isLast ? "└── " : "├── ");
+        const auto& k = s->kind;
+        std::string nextPrefix = prefix + (isLast ? "    " : "│   ");
 
-        case ExprKind::Tag::Unary:
-            std::cout << indent(d)
-                      << "Unary(" << (k.unary_op == UnaryOp::Neg ? "-" : "!") << ")\n";
-            if (k.operand) printExpr(*k.operand, d+1);
-            break;
+        switch (k.tag) {
+            case StmtKind::Tag::Let:
+                out << "Let(" << k.let_ident.name() << ": " << tyKindStr(k.let_ident.ty_kind()) << ")\n";
+                if (k.let_expr) printExpr(k.let_expr.get(), nextPrefix, true);
+                break;
 
-        case ExprKind::Tag::Call:
-            std::cout << indent(d) << "Call\n";
-            if (k.callee) printExpr(*k.callee, d+1);
-            for (const auto& a : k.args) printExpr(*a, d+1);
-            break;
-
-        case ExprKind::Tag::Index:
-            std::cout << indent(d) << "Index\n";
-            if (k.obj)   printExpr(*k.obj,   d+1);
-            if (k.index) printExpr(*k.index, d+1);
-            break;
-
-        case ExprKind::Tag::Field:
-            std::cout << indent(d) << "Field(." << k.member << ")\n";
-            if (k.target) printExpr(*k.target, d+1);
-            break;
-
-        case ExprKind::Tag::Scope:
-            std::cout << indent(d) << "Scope(::" << k.member << ")\n";
-            if (k.target) printExpr(*k.target, d+1);
-            break;
-
-        case ExprKind::Tag::Pipe:
-            std::cout << indent(d) << "Pipe(|>)\n";
-            if (k.pipe_lhs) printExpr(*k.pipe_lhs, d+1);
-            if (k.pipe_rhs) printExpr(*k.pipe_rhs, d+1);
-            break;
-
-        case ExprKind::Tag::ChannelSend:
-            std::cout << indent(d) << "ChannelSend(<-)\n";
-            if (k.channel)  printExpr(*k.channel,  d+1);
-            if (k.send_val) printExpr(*k.send_val, d+1);
-            break;
-
-        case ExprKind::Tag::Await:
-            std::cout << indent(d) << "Await\n";
-            if (k.awaited) printExpr(*k.awaited, d+1);
-            break;
-
-        case ExprKind::Tag::Grad:
-            std::cout << indent(d) << "Grad\n";
-            if (k.grad_loss)   printExpr(*k.grad_loss,   d+1);
-            if (k.grad_params) printExpr(*k.grad_params, d+1);
-            break;
-
-        case ExprKind::Tag::If:
-            std::cout << indent(d) << "IfExpr\n";
-            if (k.condition)   printExpr(*k.condition,   d+1);
-            if (k.then_branch) printExpr(*k.then_branch, d+1);
-            if (k.else_branch) printExpr(*k.else_branch, d+1);
-            break;
-
-        case ExprKind::Tag::Match:
-            std::cout << indent(d) << "MatchExpr\n";
-            if (k.match_subject) printExpr(*k.match_subject, d+1);
-            for (const auto& arm : k.arms)
-            {
-                std::cout << indent(d+1) << "Arm\n";
-                if (arm.pattern) printExpr(*arm.pattern, d+2);
-                if (arm.guard.has_value()) {
-                    std::cout << indent(d+2) << "Guard\n";
-                    printExpr(*arm.guard.value(), d+3);
+            case StmtKind::Tag::Func:
+                if (k.func.has_value()) {
+                    const auto& f = k.func.value();
+                    out << "Func(" << f.ident.name() << ") -> " << tyKindStr(f.ident.ty_kind()) << "\n";
+                    for (size_t i = 0; i < f.params.size(); ++i) {
+                        out << nextPrefix << "├── Param(" << f.params[i].name() << ")\n";
+                    }
+                    printCompound(f.body, nextPrefix, true);
                 }
-                if (arm.hasStmtBody()) printStmt(*arm.body_stmt, d+2);
-                else if (arm.body) printExpr(*arm.body, d+2);
-            }
-            break;
+                break;
 
-        case ExprKind::Tag::Block:
-            std::cout << indent(d) << "Block\n";
-            printCompound(k.block, d+1);
-            break;
+            case StmtKind::Tag::Return:
+                out << "Return\n";
+                if (k.ret_expr) printExpr(k.ret_expr.get(), nextPrefix, true);
+                break;
 
-        case ExprKind::Tag::FnExpr:
-            std::cout << indent(d) << "FnExpr -> " << tyKindStr(k.fn_ret_type) << "\n";
-            for (const auto& p : k.fn_params)
-                std::cout << indent(d+1) << "Param(" << p.first << ": " << tyKindStr(p.second) << ")\n";
-            printCompound(k.fn_body, d+1);
-            break;
+            case StmtKind::Tag::If:
+                out << "If\n";
+                if (k.if_cond) printExpr(k.if_cond.get(), nextPrefix, false);
+                printCompound(k.if_body, nextPrefix, k.else_or_else_if == nullptr);
+                if (k.else_or_else_if) printStmt(k.else_or_else_if.get(), prefix, isLast); 
+                break;
 
-        case ExprKind::Tag::ArrayLit:
-            std::cout << indent(d) << "ArrayLit[" << k.elements.size() << "]\n";
-            for (const auto& el : k.elements) printExpr(*el, d+1);
-            break;
+            case StmtKind::Tag::While:
+                out << "While" << (k.while_cond ? "" : " (infinite)") << "\n";
+                if (k.while_cond) printExpr(k.while_cond.get(), nextPrefix, false);
+                printCompound(k.while_body, nextPrefix, true);
+                break;
 
-        case ExprKind::Tag::TensorLit:
-            std::cout << indent(d) << "TensorLit[" << k.rows.size() << " rows]\n";
-            for (size_t r = 0; r < k.rows.size(); r++)
-            {
-                std::cout << indent(d+1) << "Row " << r << "\n";
-                for (const auto& el : k.rows[r]) printExpr(*el, d+2);
-            }
-            break;
-
-        case ExprKind::Tag::SetLit:
-            std::cout << indent(d) << "SetLit[" << k.elements.size() << "]\n";
-            for (const auto& el : k.elements) printExpr(*el, d+1);
-            break;
-
-        case ExprKind::Tag::MapLit:
-            std::cout << indent(d) << "MapLit[" << k.map_pairs.size() << " pairs]\n";
-            for (const auto& pair : k.map_pairs)
-            {
-                std::cout << indent(d+1) << "Pair\n";
-                printExpr(*pair.first,  d+2);
-                printExpr(*pair.second, d+2);
-            }
-            break;
-
-        case ExprKind::Tag::QueueLit:
-            std::cout << indent(d) << "QueueLit[" << k.elements.size() << "]\n";
-            for (const auto& el : k.elements) printExpr(*el, d+1);
-            break;
-
-        case ExprKind::Tag::StackLit:
-            std::cout << indent(d) << "StackLit[" << k.elements.size() << "]\n";
-            for (const auto& el : k.elements) printExpr(*el, d+1);
-            break;
-
-        case ExprKind::Tag::TupleLit:
-            std::cout << indent(d) << "TupleLit[" << k.elements.size() << "]\n";
-            for (const auto& el : k.elements) printExpr(*el, d+1);
-            break;
-
-        default:
-            std::cout << indent(d) << "<unknown expr>\n";
-    }
-}
-
-static void printCompound(const Compound& c, int d)
-{
-    for (const auto& s : c.stmts)
-        printStmt(*s, d);
-    if (c.tail_expr)
-    {
-        std::cout << indent(d) << CLR_YELLOW << "TailExpr" << CLR_RESET << "\n";
-        printExpr(*c.tail_expr, d+1);
-    }
-}
-
-static void printStmt(const Stmt& s, int d)
-{
-    const StmtKind& k = s.kind;
-    switch (k.tag)
-    {
-        case StmtKind::Tag::Let:
-            std::cout << indent(d) << "Let("
-                      << k.let_ident.name() << ": "
-                      << tyKindStr(k.let_ident.ty_kind()) << ")\n";
-            if (k.let_expr) printExpr(*k.let_expr, d+1);
-            break;
-
-        case StmtKind::Tag::Func:
-            if (k.func.has_value())
-            {
-                const Func& f = k.func.value();
-                std::cout << indent(d) << "Func(" << f.ident.name()
-                          << ") -> " << tyKindStr(f.ident.ty_kind()) << "\n";
-                for (const auto& p : f.params)
-                    std::cout << indent(d+1) << "Param("
-                              << p.name() << ": " << tyKindStr(p.ty_kind()) << ")\n";
-                printCompound(f.body, d+1);
-            }
-            break;
-
-        case StmtKind::Tag::Return:
-            std::cout << indent(d) << "Return\n";
-            if (k.ret_expr) printExpr(*k.ret_expr, d+1);
-            else            std::cout << indent(d+1) << "(void)\n";
-            break;
-
-        case StmtKind::Tag::If:
-            std::cout << indent(d) << "If\n";
-            if (k.if_cond) printExpr(*k.if_cond, d+1);
-            printCompound(k.if_body, d+1);
-            if (k.else_or_else_if) printStmt(*k.else_or_else_if, d);
-            break;
-
-        case StmtKind::Tag::Else:
-            std::cout << indent(d) << "Else\n";
-            printCompound(k.else_body, d+1);
-            break;
-
-        case StmtKind::Tag::While:
-            std::cout << indent(d) << "While"
-                      << (k.while_cond ? "" : "(infinite)") << "\n";
-            if (k.while_cond) printExpr(*k.while_cond, d+1);
-            printCompound(k.while_body, d+1);
-            break;
-
-        case StmtKind::Tag::For:
-            std::cout << indent(d) << "For(" << k.for_var << " in)\n";
-            if (k.for_iter) printExpr(*k.for_iter, d+1);
-            printCompound(k.for_body, d+1);
-            break;
-
-        case StmtKind::Tag::Match:
-            std::cout << indent(d) << "Match\n";
-            if (k.match_subject) printExpr(*k.match_subject, d+1);
-            for (const auto& arm : k.match_arms)
-            {
-                std::cout << indent(d+1) << "Arm\n";
-                if (arm.pattern) printExpr(*arm.pattern, d+2);
-                if (arm.guard.has_value()) {
-                    std::cout << indent(d+2) << "Guard\n";
-                    printExpr(*arm.guard.value(), d+3);
+            case StmtKind::Tag::Struct:
+                out << "StructDef [" << k.struct_name << "]\n";
+                for (size_t i = 0; i < k.struct_fields.size(); ++i) {
+                    bool lastF = (i == k.struct_fields.size() - 1);
+                    out << nextPrefix << (lastF ? "└── " : "├── ") << "Field: " << k.struct_fields[i].name << "\n";
                 }
-                if (arm.hasStmtBody()) printStmt(*arm.body_stmt, d+2);
-                else if (arm.body) printExpr(*arm.body, d+2);
-            }
-            break;
+                break;
 
-        case StmtKind::Tag::Break:
-            std::cout << indent(d) << "Break\n";
-            break;
+            case StmtKind::Tag::Expr:
+                out << "ExprStmt\n";
+                if (k.expr) printExpr(k.expr.get(), nextPrefix, true);
+                break;
 
-        case StmtKind::Tag::Continue:
-            std::cout << indent(d) << "Continue\n";
-            break;
-
-        case StmtKind::Tag::Import:
-            std::cout << indent(d) << "Import(\"" << k.import_path << "\"";
-            if (!k.import_alias.empty())
-                std::cout << " as " << k.import_alias;
-            std::cout << ")\n";
-            break;
-
-        case StmtKind::Tag::Spawn:
-            std::cout << indent(d) << "Spawn\n";
-            if (k.spawn_fn) printStmt(*k.spawn_fn, d+1);
-            break;
-
-        case StmtKind::Tag::Expr:
-            std::cout << indent(d) << "ExprStmt\n";
-            if (k.expr) printExpr(*k.expr, d+1);
-            break;
-
-        default:
-            std::cout << indent(d) << "<unknown stmt>\n";
+            default:
+                out << "<unimplemented stmt>\n";
+                break;
+        }
     }
-}
+
+    void printExpr(const Expr* e, const std::string& prefix, bool isLast) {
+        if (!e) return;
+
+        out << prefix << (isLast ? "└── " : "├── ");
+        const auto& k = e->kind;
+        std::string nextPrefix = prefix + (isLast ? "    " : "│   ");
+
+        switch (k.tag) {
+            case ExprKind::Tag::Lit:
+                out << "Lit: " << k.lit.str_val << "\n";
+                break;
+
+            case ExprKind::Tag::Id:
+                out << "Id: " << k.id.name() << " (" << tyKindStr(k.id.ty_kind()) << ")\n";
+                break;
+
+            case ExprKind::Tag::Binary:
+                out << "Binary(" << (int)k.bin_op << ")\n"; // use your binOpStr here
+                printExpr(k.lhs.get(), nextPrefix, false);
+                printExpr(k.rhs.get(), nextPrefix, true);
+                break;
+
+            case ExprKind::Tag::Call:
+                out << "Call\n";
+                if (k.callee) printExpr(k.callee.get(), nextPrefix, k.args.empty());
+                for (size_t i = 0; i < k.args.size(); ++i) {
+                    printExpr(k.args[i].get(), nextPrefix, i == k.args.size() - 1);
+                }
+                break;
+
+            case ExprKind::Tag::Field:
+                out << "Field(." << k.member << ")\n";
+                printExpr(k.target.get(), nextPrefix, true);
+                break;
+
+            default:
+                out << "<unimplemented expr>\n";
+                break;
+        }
+    }
+
+    void printCompound(const Compound& c, const std::string& prefix, bool isLast) {
+        std::string nextPrefix = prefix + (isLast ? "    " : "│   ");
+        for (size_t i = 0; i < c.stmts.size(); ++i) {
+            bool lastS = (i == c.stmts.size() - 1 && !c.tail_expr);
+            printStmt(c.stmts[i].get(), nextPrefix, lastS);
+        }
+        if (c.tail_expr) {
+            out << nextPrefix << "└── TailExpr\n";
+            printExpr(c.tail_expr.get(), nextPrefix + "    ", true);
+        }
+    }
+};
 
 // ─────────────────────────────────────────────
 //  Test runner
@@ -410,6 +207,8 @@ static void runTest(const TestCase& tc, std::ostream& out)
         // Note: For the file output, you might want to redirect 
         // std::cout or modify printStmt to take an ostream.
         // For now, this tracks the logic:
+        ASTPrinter printer(out);
+        printer.print(program);
         out << "PASS\n";
         passed++;
     }
@@ -1003,6 +802,44 @@ fn main() -> void {
     let x = math::sqrt(2.0)
     print(x)
 }
+            )",
+            false
+        },
+        {
+            "Program: struct definition",
+            R"(
+                struct Point {
+                    x: i32,
+                    y: i32,
+                    label: str
+                }
+            )",
+            false
+        },
+        {
+            "Program: Struct Instance Declaration",
+            R"(
+                struct Player { id: i32 }
+                
+                fn main() -> void {
+                    let p1: Player = get_player()
+                }
+            )",
+            false 
+        },
+        {
+            "Program: Nested Struct Field Access",
+            R"(
+                struct Transform {
+                    position: Vec3,
+                    rotation: f32
+                }
+
+                fn update() -> void {
+                    let t: Transform = get_transform()
+                    let x_pos = t.position.x
+                    t.rotation = 90.0
+                }
             )",
             false
         },

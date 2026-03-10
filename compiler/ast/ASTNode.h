@@ -77,6 +77,7 @@ struct Ident
     const Position&    pos()     const { return info.pos; }
     void set_ty_kind(TyKind t) { info.ty_kind = t; }
     void set_ctx(IdentCtx c)   { info.ctx = c; }
+    const std::optional<std::string>& user_type_name() const { return info.user_type_name; }
     const std::string& type_name() const
     {
         if (info.ty_kind == TyKind::UserDef && info.user_type_name.has_value()) return *info.user_type_name;
@@ -341,8 +342,7 @@ struct Expr
 {
     ExprKind kind;
     Position pos;
-    Expr(ExprKind k, Position p)
-        : kind(std::move(k)), pos(p) {}
+    Expr(ExprKind k, Position p) : kind(std::move(k)), pos(p) {}
 };
 
 struct Func
@@ -351,8 +351,7 @@ struct Func
     std::vector<std::string> generic_names;
     std::vector<Ident>       params;
     Compound    body;
-    Func(Ident id, std::vector<Ident> p, Compound b)
-        : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
+    Func(Ident id, std::vector<Ident> p, Compound b) : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
 };
 
 struct StructField
@@ -361,8 +360,7 @@ struct StructField
     TyKind      ty;
     Position    pos;
     std::string user_type_name;
-    StructField(std::string n, TyKind t, Position p)
-        : name(std::move(n)), ty(t), pos(std::move(p)) {};
+    StructField(std::string n, TyKind t, Position p) : name(std::move(n)), ty(t), pos(std::move(p)) {};
 };
 
 struct StmtKind

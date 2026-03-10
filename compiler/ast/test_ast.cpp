@@ -619,5 +619,84 @@ int main() {
         analyzer.validate(program); 
     });
 
+    run_test("Struct Test: Undefined Type", []() {
+        SemanticAnalyzer analyzer;
+        Program program;
+
+        // We use TyKind::Infer for the RHS so the assignment compatibility check passes
+        auto dummy_rhs = std::make_unique<Expr>(ExprKind::makeId("_", TyKind::Infer, IdentCtx::Ref, Position{1, 20}), Position{1, 20});
+
+        IdentInfo x_info("x", TyKind::UserDef, IdentCtx::Def, Position{1, 5}, "UnknownStruct");
+        
+        program.addStmt(std::make_unique<Stmt>(
+            StmtKind::makeLet(Ident::unqual(std::move(x_info)), std::move(dummy_rhs)),
+            Position{1, 1}
+        ));
+
+        // NOW it should hit: "Undefined struct type 'UnknownStruct'"
+        analyzer.validate(program); 
+    });
+
+    run_test("Struct Test: Missing Field", []() {
+        SemanticAnalyzer analyzer;
+        Program program;
+
+        // 1. struct Point { x: i32 }
+        std::vector<StructField> fields;
+        fields.emplace_back("x", TyKind::I32, Position{1, 10});
+        program.addStmt(std::make_unique<Stmt>(StmtKind::makeStruct("Point", std::move(fields)), Position{1, 1}));
+
+        // 2. let p: Point = _ (Using Infer to skip assignment error)
+        IdentInfo p_info("p", TyKind::UserDef, IdentCtx::Def, Position{2, 5}, "Point");
+        auto dummy_rhs = std::make_unique<Expr>(ExprKind::makeId("_", TyKind::Infer, IdentCtx::Ref, Position{2, 15}), Position{2, 15});
+        
+        program.addStmt(std::make_unique<Stmt>(
+            StmtKind::makeLet(Ident::unqual(std::move(p_info)), std::move(dummy_rhs)),
+            Position{2, 1}
+        ));
+
+        // 3. p.y
+        auto target = std::make_unique<Expr>(ExprKind::makeId("p", TyKind::UserDef, IdentCtx::Ref, Position{3, 1}), Position{3, 1});
+        auto field_expr = std::make_unique<Expr>(ExprKind::makeField(std::move(target), "y"), Position{3, 1});
+        program.addStmt(std::make_unique<Stmt>(StmtKind::makeExpr(std::move(field_expr)), Position{3, 1}));
+
+        // Expected: "Struct 'Point' has no field 'y'"
+        analyzer.validate(program);
+    });
+
+    run_test("Struct Test: Nested Access", []() {
+        SemanticAnalyzer analyzer;
+        Program program;
+
+        // 1. struct Inner { val: f32 }
+        std::vector<StructField> inner_f;
+        inner_f.emplace_back("val", TyKind::F32, Position{1, 10});
+        program.addStmt(std::make_unique<Stmt>(StmtKind::makeStruct("Inner", std::move(inner_f)), Position{1, 1}));
+
+        // 2. struct Outer { node: Inner }
+        std::vector<StructField> outer_f;
+        outer_f.emplace_back("node", TyKind::UserDef, Position{2, 10});
+        outer_f.back().user_type_name = "Inner"; 
+        program.addStmt(std::make_unique<Stmt>(StmtKind::makeStruct("Outer", std::move(outer_f)), Position{2, 1}));
+
+        // 3. let obj: Outer = _
+        IdentInfo obj_info("obj", TyKind::UserDef, IdentCtx::Def, Position{3, 5}, "Outer");
+        auto dummy_rhs = std::make_unique<Expr>(ExprKind::makeId("_", TyKind::Infer, IdentCtx::Ref, Position{3, 15}), Position{3, 15});
+        program.addStmt(std::make_unique<Stmt>(
+            StmtKind::makeLet(Ident::unqual(std::move(obj_info)), std::move(dummy_rhs)),
+            Position{3, 1}
+        ));
+
+        // 4. obj.node.val
+        auto obj_id = std::make_unique<Expr>(ExprKind::makeId("obj", TyKind::UserDef, IdentCtx::Ref, Position{4, 1}), Position{4, 1});
+        auto first_access = std::make_unique<Expr>(ExprKind::makeField(std::move(obj_id), "node"), Position{4, 1});
+        auto second_access = std::make_unique<Expr>(ExprKind::makeField(std::move(first_access), "val"), Position{4, 5});
+
+        program.addStmt(std::make_unique<Stmt>(StmtKind::makeExpr(std::move(second_access)), Position{4, 1}));
+
+        // Should now pass without "Variable assignment type mismatch"
+        analyzer.validate(program);
+    });
+
     return 0;
 }
