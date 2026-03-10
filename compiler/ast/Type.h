@@ -49,6 +49,11 @@ struct Type
         // callables
         Fn,         // args[0..N-1]   = parameter types
                     // args[N]        = return type  (always last)
+        // async
+        Task,       // args[0]        = inner value type T
+                    // Task<T> is the handle returned by `spawn { expr }`.
+                    // `await task` unwraps Task<T> back to T.
+                    // Only legal inside async fn or spawn body.
         // user-defined / generic
         Named,      // type_name = struct name, e.g. "Point"
         Var,        // type_name = generic param name, e.g. "T"
@@ -128,6 +133,12 @@ struct Type
         return t;
     }
 
+    static TypePtr task(TypePtr inner) {
+        auto t = std::make_shared<Type>(Kind::Task);
+        t->args = { std::move(inner) };
+        return t;
+    }
+
     static TypePtr named(std::string name) {
         auto t = std::make_shared<Type>(Kind::Named);
         t->type_name = std::move(name);
@@ -171,6 +182,9 @@ struct Type
         return { args.begin(), args.end() - 1 };
     }
 
+    bool    is_task()     const { return kind == Kind::Task; }
+    TypePtr inner_type()  const { return (!args.empty()) ? args[0] : infer(); }
+
     bool operator==(const Type& o) const {
         if (kind == Kind::Infer || o.kind == Kind::Infer) return true;
         if (kind != o.kind)                               return false;
@@ -202,10 +216,8 @@ struct Type
             case Kind::Infer: return "<infer>";
             case Kind::Named: return type_name;
             case Kind::Var:   return type_name;
-
             case Kind::Array:
                 return "Array<" + s(args.empty() ? nullptr : args[0]) + ">";
-
             case Kind::Tensor: {
                 std::string out = "Tensor<" + s(args.empty() ? nullptr : args[0]);
                 if (!shape.empty()) {
@@ -218,15 +230,13 @@ struct Type
                 }
                 return out + ">";
             }
-
             case Kind::Map:
                 return "Map<" + s(args.size() > 0 ? args[0] : nullptr)
                      + ", " + s(args.size() > 1 ? args[1] : nullptr) + ">";
-
             case Kind::Set:   return "Set<"   + s(args.empty() ? nullptr : args[0]) + ">";
             case Kind::Queue: return "Queue<" + s(args.empty() ? nullptr : args[0]) + ">";
             case Kind::Stack: return "Stack<" + s(args.empty() ? nullptr : args[0]) + ">";
-
+            case Kind::Task:  return "Task<"  + s(args.empty() ? nullptr : args[0]) + ">";
             case Kind::Tuple: {
                 std::string out = "Tuple<";
                 for (size_t i = 0; i < args.size(); ++i) {
@@ -235,7 +245,6 @@ struct Type
                 }
                 return out + ">";
             }
-
             case Kind::Fn: {
                 std::string out = "fn(";
                 auto params = param_types();
@@ -245,7 +254,6 @@ struct Type
                 }
                 return out + ") -> " + s(ret_type());
             }
-
             default: return "?";
         }
     }

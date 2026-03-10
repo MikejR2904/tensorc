@@ -15,6 +15,7 @@ struct Symbol {
     IdentCtx    ctx;
     Position    pos;
     bool is_parallel_safe = true;
+    bool is_mutable = true;
     bool requires_grad = false; 
     Symbol(std::string n, TypePtr t, IdentCtx c, Position p = {}) : name(std::move(n)), type(t), ctx(c), pos(p) {}
     bool is_infer() const { return !type || type->is_infer(); }

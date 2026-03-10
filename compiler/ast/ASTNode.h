@@ -177,6 +177,7 @@ struct ExprKind
         QueueLit,
         StackLit,
         TupleLit,
+        StructLit,
     } tag;
 
     LitKind lit;
@@ -213,6 +214,9 @@ struct ExprKind
     std::vector<std::vector<ExprPtr>> rows;   // tensor  (row-major)
     std::optional<GenericParams> generic_params;
     std::vector<std::pair<ExprPtr,ExprPtr>> map_pairs;  // Map{"k": v}
+
+    std::string struct_init_name;
+    std::vector<std::pair<std::string, ExprPtr>> struct_init_fields;
 
     Expr* subject() const
     {
@@ -336,13 +340,22 @@ struct ExprKind
         ek.grad_params = std::move(params);
         return ek;
     }
+
+    static ExprKind makeStructLit(std::string name, std::vector<std::pair<std::string, ExprPtr>> fields) {
+        ExprKind ek;
+        ek.tag               = Tag::StructLit;
+        ek.struct_init_name  = std::move(name);
+        ek.struct_init_fields = std::move(fields);
+        return ek;
+    }
 };
 
 struct Expr
 {
     ExprKind kind;
     Position pos;
-    Expr(ExprKind k, Position p) : kind(std::move(k)), pos(p) {}
+    TypePtr resolved_type;
+    Expr(ExprKind k, Position p) : kind(std::move(k)), pos(p), resolved_type(nullptr) {}
 };
 
 struct Func
@@ -351,6 +364,7 @@ struct Func
     std::vector<std::string> generic_names;
     std::vector<Ident>       params;
     Compound    body;
+    bool        is_async = false;
     Func(Ident id, std::vector<Ident> p, Compound b) : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
 };
 

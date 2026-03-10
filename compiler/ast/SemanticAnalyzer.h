@@ -3,9 +3,13 @@
 #include "ASTNode.h"
 #include "Type.h"
 #include "SymbolTable.h"
+#include "../io/ImportRegistry.h"
 #include <stdexcept>
 #include <string>
 #include <iostream>
+#include <unordered_map>
+#include <unordered_set>
+#include <functional>
 
 struct StructDef {
     std::string name;
@@ -15,11 +19,15 @@ struct StructDef {
 
 class SemanticAnalyzer {
 public:
+    explicit SemanticAnalyzer(ImportRegistry imports = ImportRegistry::with_builtins()) 
+        : symb_tab(), import_reg(std::move(imports)) {}
+
     SemanticAnalyzer() : symb_tab() {}
     void validate(Program& program) {
         try {
             for (auto& stmt : program.stmts)
                 register_top_level(stmt.get());
+            validate_structs();
             for (auto& stmt : program.stmts) {
                 validate_stmt(stmt.get());
             }
@@ -31,10 +39,12 @@ public:
 
 private:
     SymbolTable symb_tab;
+    ImportRegistry import_reg;
+    std::unordered_map<std::string, std::string> active_imports;
     std::unordered_map<std::string, StructDef> struct_registry;
     TypePtr expected_ret_ty = Type::void_();
     int iteration_depth = 0;
-
+    int async_depth = 0;
     void register_struct(const StructDef& def)
     {
         struct_registry[def.name] = std::move(def);
@@ -100,7 +110,15 @@ private:
             }
             case StmtKind::Tag::Match: return validate_match(stmt);
             case StmtKind::Tag::Spawn: return validate_spawn(stmt);
-            case StmtKind::Tag::Import: return Type::void_(); // TODO: open registry
+            case StmtKind::Tag::Import: {
+                const std::string& mod_name = stmt->kind.import_path;
+                const std::string& alias = stmt->kind.import_alias.empty() ? mod_name : stmt->kind.import_alias;
+                if (!import_reg.has_module(mod_name)) {
+                    error("Module '" + mod_name + "' not found in registry", stmt->pos);
+                }
+                active_imports[alias] = mod_name;
+                return Type::void_();
+            }
             default: return Type::void_();
         }
         return Type::void_(); 
@@ -128,7 +146,12 @@ private:
                 std::move(inner));
             expect_compat(var_ty, rhs_ty, stmt->pos, "Variable '" + stmt->kind.let_ident.name() + "' type mismatch");
         }
-        symb_tab.define(Symbol(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos));
+        Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos);
+        if (var_ty && var_ty->kind == Type::Kind::Tensor) {
+            const auto& utn = stmt->kind.let_ident.user_type_name();
+            sym.requires_grad = (!utn->empty() && utn == "@grad");
+        }
+        symb_tab.define(sym);
         return var_ty;
     }
 
@@ -146,11 +169,13 @@ private:
         symb_tab.pushScope();
         TypePtr old_expect = expected_ret_ty;
         expected_ret_ty = ret;
+        if (func.is_async) async_depth++;
         // Register parameters in function scope
         for (auto& param : func.params) {
             symb_tab.define(Symbol(param.name(), Type::fromTyKind(param.ty_kind(), param.user_type_name()), IdentCtx::Param, param.pos()));
         }
         TypePtr body_ret_ty = validate_compound(func.body, true);
+        if (func.is_async) async_depth--;
         // Ensure return type matches
         if (!ret->is_void())
             expect_compat(ret, body_ret_ty, func.ident.pos(), "Function '" + func.ident.name() + "' return type mismatch");
@@ -161,8 +186,15 @@ private:
 
     // --- Expression Validation ---
 
-    TypePtr validate_expr(Expr* expr) {
+    TypePtr validate_expr(Expr* expr)
+    {
         if (!expr) return Type::void_();
+        TypePtr ty = validate_expr_inner(expr);
+        expr->resolved_type = ty;
+        return ty;
+    }
+
+    TypePtr validate_expr_inner(Expr* expr) {
         switch (expr->kind.tag) {
             case ExprKind::Tag::Lit: return validate_lit(expr->kind.lit);
             case ExprKind::Tag::Id: {
@@ -176,6 +208,12 @@ private:
             case ExprKind::Tag::Unary: return validate_unary(expr->kind.unary_op, expr->kind.operand.get(), expr->pos);
             case ExprKind::Tag::Binary: return validate_bin_op(expr->kind.bin_op, expr->kind.lhs.get(), expr->kind.rhs.get(), expr->pos);
             case ExprKind::Tag::Assign: {
+                if (expr->kind.lhs && expr->kind.lhs->kind.tag == ExprKind::Tag::Id) {
+                    const std::string& lname = expr->kind.lhs->kind.id.name();
+                    Symbol* ls = symb_tab.lookup(lname);
+                    if (ls && !ls->is_mutable)
+                        error("Cannot assign to immutable variable '" + lname + "'", expr->pos);
+                }
                 TypePtr l = validate_expr(expr->kind.lhs.get());
                 TypePtr r = validate_expr(expr->kind.rhs.get());
                 expect_compat(l, r, expr->pos, "Assignment type mismatch");
@@ -289,22 +327,118 @@ private:
             case ExprKind::Tag::Field: { // expr.member
                 TypePtr obj_ty = validate_expr(expr->kind.target.get());
                 if (!obj_ty || obj_ty->is_infer()) return Type::infer();
+                const std::string& mem = expr->kind.member;
+                if (obj_ty->kind == Type::Kind::Tensor) {
+                    // Data attributes
+                    if (mem == "shape") return Type::array(Type::i32());
+                    if (mem == "rank")  return Type::i32();
+                    if (mem == "size")  return Type::i32();
+                    if (mem == "dtype") return Type::str_();
+                    // Reduction methods  →  fn() -> elem_type
+                    if (mem == "sum"  || mem == "mean" ||
+                        mem == "min"  || mem == "max"  || mem == "prod")
+                        return Type::fn({}, obj_ty->elem_type());
+                    // Shape manipulation  →  fn() -> Tensor<elem>
+                    if (mem == "flatten" || mem == "contiguous" || mem == "clone")
+                        return Type::fn({}, obj_ty);
+                    if (mem == "T")       // transpose
+                        return obj_ty;
+                    // Gradient-related
+                    if (mem == "grad")
+                        return Type::tensor(obj_ty->elem_type());
+                    if (mem == "detach")
+                        return Type::fn({}, obj_ty);
+                    if (mem == "requires_grad")
+                        return Type::bool_();
+                    // Indexing
+                    if (mem == "item")
+                        return obj_ty->elem_type();
+                    error("Tensor has no attribute '" + mem + "'", expr->pos);
+                }
+                if (obj_ty->kind == Type::Kind::Array) {
+                    if (mem == "len")  return Type::i32();
+                    if (mem == "push") return Type::fn({obj_ty->elem_type()}, Type::void_());
+                    if (mem == "pop")  return Type::fn({}, obj_ty->elem_type());
+                    if (mem == "is_empty") return Type::bool_();
+                    error("Array has no attribute '" + mem + "'", expr->pos);
+                }
+                if (obj_ty->kind == Type::Kind::Map) {
+                    if (mem == "len")      return Type::i32();
+                    if (mem == "is_empty") return Type::bool_();
+                    if (mem == "keys")     return Type::array(obj_ty->key_type());
+                    if (mem == "values")   return Type::array(obj_ty->val_type());
+                    if (mem == "contains") return Type::fn({obj_ty->key_type()}, Type::bool_());
+                    if (mem == "get")      return Type::fn({obj_ty->key_type()}, obj_ty->val_type());
+                    if (mem == "insert")   return Type::fn({obj_ty->key_type(), obj_ty->val_type()}, Type::void_());
+                    if (mem == "remove")   return Type::fn({obj_ty->key_type()}, Type::void_());
+                    error("Map has no attribute '" + mem + "'", expr->pos);
+                }
+                if (obj_ty->kind == Type::Kind::Str) {
+                    if (mem == "len")      return Type::i32();
+                    if (mem == "is_empty") return Type::bool_();
+                    if (mem == "to_upper" || mem == "to_lower" || mem == "trim")
+                        return Type::fn({}, Type::str_());
+                    if (mem == "contains") return Type::fn({Type::str_()}, Type::bool_());
+                    if (mem == "split")    return Type::array(Type::str_());
+                    if (mem == "parse_i32") return Type::i32();
+                    if (mem == "parse_f32") return Type::f32();
+                    error("Str has no attribute '" + mem + "'", expr->pos);
+                }
+                if (obj_ty->kind == Type::Kind::Task) {
+                    if (mem == "is_done")  return Type::bool_();
+                    if (mem == "cancel")   return Type::fn({}, Type::void_());
+                    error("Task has no attribute '" + mem + "'", expr->pos);
+                }
                 if (obj_ty->kind == Type::Kind::Named) {
                     const std::string& sname = obj_ty->type_name;
                     auto it = struct_registry.find(sname);
                     if (it == struct_registry.end())
                         error("Unknown struct type '" + sname + "'", expr->pos);
-                    auto fit = it->second.fields.find(expr->kind.member);
+                    auto fit = it->second.fields.find(mem);
                     if (fit == it->second.fields.end())
-                        error("Struct '" + sname + "' has no field '" +
-                              expr->kind.member + "'", expr->pos);
+                        error("Struct '" + sname + "' has no field '" + mem + "'",
+                              expr->pos);
                     return fit->second;
                 }
+
                 return Type::infer();
             }
             case ExprKind::Tag::Scope: { // expr::member
-                validate_expr(expr->kind.target.get());
-                return Type::infer(); // TODO: ImportRegistry
+                if (!expr->kind.target || expr->kind.target->kind.tag != ExprKind::Tag::Id)
+                {
+                    validate_expr(expr->kind.target.get());
+                    return Type::infer();  // chained scope — future work
+                }
+                const std::string& alias = expr->kind.target->kind.id.name();
+                const std::string& sym   = expr->kind.member;
+                std::string canon;
+                auto ait = active_imports.find(alias);
+                if (ait != active_imports.end()) {
+                    canon = ait->second;               // explicit import alias
+                } else if (import_reg.has_module(alias)) {
+                    canon = alias;                     // built-in, no import needed
+                } else {
+                    error("Unknown module alias '" + alias + "'. "
+                          "Add  import \"" + alias + "\"  (or  import \"<path>\" as " +
+                          alias + ")  to bring it into scope.",
+                          expr->pos);
+                }
+                const Symbol* found = import_reg.lookup(canon, sym);
+                if (!found) {
+                    std::string hint;
+                    auto names = import_reg.exported_names(canon);
+                    if (names.has_value() && !names->empty()) {
+                        hint = " Available: ";
+                        for (size_t i = 0; i < names->size(); ++i) {
+                            if (i) hint += ", ";
+                            hint += (*names)[i];
+                        }
+                    }
+                    error("Module '" + canon + "' (alias '" + alias + "') "
+                          "has no exported symbol '" + sym + "'." + hint,
+                          expr->pos);
+                }
+                return found->type;
             }
             case ExprKind::Tag::Range: { // lo..hi
                 TypePtr lo = validate_expr(expr->kind.lhs.get());
@@ -317,7 +451,20 @@ private:
                 validate_expr(expr->kind.send_val.get());
                 return Type::void_();
             }
-            case ExprKind::Tag::Await: return validate_expr(expr->kind.awaited.get());
+            case ExprKind::Tag::Await: {
+                if (async_depth == 0)
+                    error("'await' used outside of an async context. "
+                          "Mark the enclosing function 'async fn' or wrap in 'spawn'.",
+                          expr->pos);
+                TypePtr operand_ty = validate_expr(expr->kind.awaited.get());
+                if (!operand_ty || operand_ty->is_infer()) return Type::infer();
+                if (operand_ty->kind != Type::Kind::Task)
+                    error("'await' requires a Task<T> operand, got " +
+                          operand_ty->str() + ". "
+                          "Did you forget to 'spawn' the expression?",
+                          expr->pos);
+                return operand_ty->inner_type();
+            }
             case ExprKind::Tag::FnExpr: { // fn(x:T)->T { }
                 symb_tab.pushScope();
                 TypePtr saved_ret = expected_ret_ty;
@@ -361,6 +508,37 @@ private:
                     symb_tab.popScope();
                 }
                 return match_ret_ty;
+            }
+            case ExprKind::Tag::StructLit: {
+                const std::string& sname = expr->kind.struct_init_name;
+                auto it = struct_registry.find(sname);
+                if (it == struct_registry.end()) error("Struct literal uses unknown type '" + sname + "'", expr->pos);
+                auto& def = it->second;
+                // Check for duplicate field names in the initialiser
+                std::unordered_set<std::string> seen_fields;
+                for (auto& [fname, fexpr] : expr->kind.struct_init_fields) {
+                    if (!seen_fields.insert(fname).second)
+                        error("Duplicate field '" + fname +
+                              "' in struct literal for '" + sname + "'",
+                              expr->pos);
+                    auto fit = def.fields.find(fname);
+                    if (fit == def.fields.end())
+                        error("Field '" + fname +
+                              "' does not exist in struct '" + sname + "'",
+                              expr->pos);
+                    TypePtr actual = validate_expr(fexpr.get());
+                    expect_compat(fit->second, actual, fexpr->pos,
+                                  "Field '" + fname + "' of '" + sname +
+                                  "' type mismatch");
+                }
+                // Check for missing required fields
+                for (auto& [fname, _] : def.fields) {
+                    if (seen_fields.find(fname) == seen_fields.end())
+                        error("Missing field '" + fname +
+                              "' in struct literal for '" + sname + "'",
+                              expr->pos);
+                }
+                return Type::named(sname);
             }
             default:
                 return Type::void_();
@@ -413,6 +591,16 @@ private:
             expect_compat(Type::bool_(), r, pos, "Right operand of && / || must be bool");
             return Type::bool_();
         }
+        if (l->kind == Type::Kind::Tensor && r->kind != Type::Kind::Tensor) {
+            expect_compat(l->elem_type(), r, pos,
+                          "Tensor broadcast: scalar type must match element type");
+            return l;   // result has same shape and elem type as the tensor
+        }
+        if (r->kind == Type::Kind::Tensor && l->kind != Type::Kind::Tensor) {
+            expect_compat(r->elem_type(), l, pos,
+                          "Tensor broadcast: scalar type must match element type");
+            return r;
+        }
         // Standard Arithmetic/Logical Compatibility
         expect_compat(l, r, pos, "Binary operator type mismatch");
         // Comparison operators return Bool
@@ -434,16 +622,24 @@ private:
             auto params = s->type->param_types();
             if (args.size() != params.size())
                 error("Function '" + fn_name + "' expects " +
-                      std::to_string(params.size()) +
-                      " argument(s), got " + std::to_string(args.size()),
-                      expr->pos);
+                    std::to_string(params.size()) +
+                    " argument(s), got " + std::to_string(args.size()),
+                    expr->pos);
+            SubstMap subst;
+            std::vector<TypePtr> actual_tys;
+            actual_tys.reserve(args.size());
             for (size_t i = 0; i < args.size(); ++i) {
                 TypePtr actual = validate_expr(args[i].get());
-                expect_compat(params[i], actual, args[i]->pos,
+                actual_tys.push_back(actual);
+                collect_subst(params[i], actual, subst, args[i]->pos);
+            }
+            for (size_t i = 0; i < args.size(); ++i) {
+                TypePtr expected = apply_subst(params[i], subst);
+                expect_compat(expected, actual_tys[i], args[i]->pos,
                               "Argument " + std::to_string(i + 1) +
                               " of '" + fn_name + "' type mismatch");
             }
-            return s->type->ret_type();
+            return apply_subst(s->type->ret_type(), subst);
         }
         for (auto& arg : args)
             validate_expr(arg.get());
@@ -522,6 +718,37 @@ private:
         return last_ty;
     }
 
+    void validate_structs()
+    {
+        // colour map — all start white (absent from map)
+        std::unordered_map<std::string, int> colour;
+        // DFS: returns the name that closes a cycle, or "" if clean.
+        std::function<void(const std::string&, const std::string&)> dfs =
+            [&](const std::string& name, const std::string& via)
+        {
+            auto it = struct_registry.find(name);
+            if (it == struct_registry.end())
+                error("Struct field references unknown type '" + name +
+                      "' (via '" + via + "')", Position{});
+            int& c = colour[name];
+            if (c == 2) return;            // already fully checked
+            if (c == 1)                    // back edge → cycle
+                error("Struct '" + name +
+                      "' is part of a value-cycle (through '" + via + "'). "
+                      "Use an indirect type to break the cycle.", Position{});
+            c = 1;   // grey — on stack
+            for (auto& [field_name, field_ty] : it->second.fields) {
+                if (!field_ty || field_ty->kind != Type::Kind::Named) continue;
+                const std::string& dep = field_ty->type_name;
+                dfs(dep, name + "." + field_name);
+            }
+            c = 2;   // black — done
+        };
+        for (auto& [name, _] : struct_registry)
+            if (colour[name] == 0)
+                dfs(name, name);
+    }
+
     TypePtr validate_if(Stmt* stmt) {
         TypePtr cond = validate_expr(stmt->kind.if_cond.get());
         expect_compat(Type::bool_(), cond, stmt->pos, "if condition must be bool");
@@ -534,9 +761,11 @@ private:
         if (!stmt->kind.spawn_fn) return Type::void_();
         int saved = iteration_depth;
         iteration_depth = 0;
-        validate_stmt(stmt->kind.spawn_fn.get());
+        async_depth++;
+        TypePtr inner_ty = validate_stmt(stmt->kind.spawn_fn.get());
+        async_depth--;
         iteration_depth = saved;
-        return Type::void_();
+        return Type::task(inner_ty ? inner_ty : Type::void_());
     }
 
     TypePtr validate_for(Stmt* stmt)
@@ -566,7 +795,10 @@ private:
         }
         symb_tab.pushScope();
         iteration_depth++;
-        symb_tab.define(Symbol(stmt->kind.for_var, elem_ty, IdentCtx::Def, stmt->pos));
+        Symbol loop_sym(stmt->kind.for_var, elem_ty, IdentCtx::Def, stmt->pos);
+        loop_sym.is_mutable = false;   // for-loop variable cannot be reassigned
+        loop_sym.requires_grad = false;  // loop counters never require gradients
+        symb_tab.define(loop_sym);
         validate_compound(stmt->kind.for_body, /*scope_already_pushed=*/true);
         iteration_depth--;
         symb_tab.popScope();
@@ -603,6 +835,52 @@ private:
         if (!type_compat(expected, actual))
             error(ctx + " (expected " + expected->str() + ", got " + actual->str() + ")", pos);
         }
+
+    using SubstMap = std::unordered_map<std::string, TypePtr>;
+    void collect_subst(const TypePtr& param, const TypePtr& actual,
+                       SubstMap& subst, Position pos)
+    {
+        if (!param || !actual) return;
+        if (param->is_infer() || actual->is_infer()) return;
+        if (param->kind == Type::Kind::Var) {
+            const std::string& tvar = param->type_name;
+            auto it = subst.find(tvar);
+            if (it == subst.end()) {
+                subst[tvar] = actual;   // first occurrence — bind it
+            } else {
+                // Subsequent occurrence — must match the already-bound type
+                expect_compat(it->second, actual, pos,
+                              "Generic type parameter '" + tvar +
+                              "' inferred as inconsistent types (" +
+                              it->second->str() + " vs " + actual->str() + ")");
+            }
+            return;
+        }
+        // Recurse into composite types (Array<T>, Fn(T)->U, etc.)
+        if (param->kind == actual->kind &&
+            param->args.size() == actual->args.size())
+        {
+            for (size_t i = 0; i < param->args.size(); ++i)
+                collect_subst(param->args[i], actual->args[i], subst, pos);
+        }
+    }
+
+    TypePtr apply_subst(const TypePtr& ty, const SubstMap& subst)
+    {
+        if (!ty) return ty;
+        if (ty->kind == Type::Kind::Var) {
+            auto it = subst.find(ty->type_name);
+            return (it != subst.end()) ? it->second : ty;
+        }
+        if (ty->args.empty()) return ty;   // primitive or Named — no vars inside
+        // Rebuild with substituted children
+        auto result = std::make_shared<Type>(ty->kind);
+        result->type_name = ty->type_name;
+        result->shape     = ty->shape;
+        for (auto& a : ty->args)
+            result->args.push_back(apply_subst(a, subst));
+        return result;
+    }
 
     static TyKind tkFromType(const TypePtr& t) {
         if (!t) return TyKind::Infer;
