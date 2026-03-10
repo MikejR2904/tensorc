@@ -192,6 +192,16 @@ private:
                 if (!param->is_infer() && param->kind != Type::Kind::Tensor && param->kind != Type::Kind::Var) {
                     error("grad() params must be Tensor (got " + param->str() + ")", expr->pos);
                 }
+                if (expr->kind.grad_params->kind.tag == ExprKind::Tag::Id) {
+                    const std::string& pname =
+                        expr->kind.grad_params->kind.id.name();
+                    Symbol* psym = symb_tab.lookup(pname);
+                    if (psym && !psym->requires_grad)
+                        error("grad() called on '" + pname +
+                              "' which does not require gradients. "
+                              "Declare it with @grad to enable gradient tracking.",
+                              expr->pos);
+                }
                 return param; 
             }
             case ExprKind::Tag::If: {
@@ -208,12 +218,13 @@ private:
             case ExprKind::Tag::Block: return validate_compound(expr->kind.block, false);
             case ExprKind::Tag::TensorLit: {
                 TypePtr elem = Type::f32();
-                std::vector<int> shape;
+                std::vector<Dim> shape;
                 if (expr->kind.generic_params.has_value()) {
                     auto& gp = *expr->kind.generic_params;
                     if (!gp.type_params.empty())
                         elem = Type::fromTyKind(gp.type_params[0]);
-                    shape = gp.shape;
+                    shape.reserve(gp.shape.size());
+                    for (int d : gp.shape) shape.emplace_back(d);
                 }
                 return Type::tensor(elem, shape);
             }
@@ -380,12 +391,20 @@ private:
             if (!r->is_infer() && r->kind != Type::Kind::Tensor)
                 error("@ requires Tensor operands (got " + r->str() + ")", pos);
             // Shape check: (M×N) @ (N×P) — inner dims must match
-            if (l->kind == Type::Kind::Tensor && r->kind == Type::Kind::Tensor &&
-                !l->shape.empty() && !r->shape.empty())
-                if (l->shape.back() != r->shape[0])
-                    error("MatMul shape mismatch: " +
-                          std::to_string(l->shape.back()) + " != " +
-                          std::to_string(r->shape[0]), pos);
+            if (l->kind == Type::Kind::Tensor && r->kind == Type::Kind::Tensor && !l->shape.empty() && !r->shape.empty()) {
+                const Dim& l_inner = l->shape.back();
+                const Dim& r_inner = r->shape.front();
+                if (!dim_compat(l_inner, r_inner))
+                    error("MatMul inner dimension mismatch: " +
+                          dim_str(l_inner) + " != " + dim_str(r_inner), pos);
+                // Build result shape: l->shape[0..-2] + r->shape[1..]
+                std::vector<Dim> result_shape;
+                for (size_t i = 0; i + 1 < l->shape.size(); ++i)
+                    result_shape.push_back(l->shape[i]);
+                for (size_t i = 1; i < r->shape.size(); ++i)
+                    result_shape.push_back(r->shape[i]);
+                return Type::tensor(l->elem_type(), std::move(result_shape));
+            }
             return Type::tensor(l->elem_type());
         }
         if (op == BinOp::And || op == BinOp::Or)

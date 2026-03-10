@@ -4,8 +4,26 @@
 #include <vector>
 #include <memory>
 #include <optional>
+#include <variant>
 #include <cassert>
 #include "ASTNode.h"
+
+using Dim = std::variant<int, std::string>;
+inline std::string dim_str(const Dim& d) {
+    return std::holds_alternative<int>(d) ? std::to_string(std::get<int>(d)) : std::get<std::string>(d);
+}
+inline bool dim_compat(const Dim& a, const Dim& b) {
+    if (std::holds_alternative<std::string>(a)) return true;
+    if (std::holds_alternative<std::string>(b)) return true;
+    return std::get<int>(a) == std::get<int>(b);
+}
+inline bool dims_compat(const std::vector<Dim>& a, const std::vector<Dim>& b) {
+    if (a.empty() || b.empty()) return true;   // unknown rank — defer to runtime
+    if (a.size() != b.size())   return false;
+    for (size_t i = 0; i < a.size(); ++i)
+        if (!dim_compat(a[i], b[i])) return false;
+    return true;
+}
 
 struct Type;
 using TypePtr = std::shared_ptr<Type>;
@@ -40,7 +58,7 @@ struct Type
 
     std::vector<TypePtr> args;        // inner types (see table above)
     std::string          type_name;   // Named / Var only
-    std::vector<int>     shape;       // Tensor only: dimension sizes
+    std::vector<Dim>     shape;       // Tensor only: dimension sizes
 
     explicit Type(Kind k) : kind(k) {}
 
@@ -59,11 +77,18 @@ struct Type
         return t;
     }
 
-    static TypePtr tensor(TypePtr elem, std::vector<int> shape = {}) {
+    static TypePtr tensor(TypePtr elem, std::vector<Dim> shape = {}) {
         auto t = std::make_shared<Type>(Kind::Tensor);
         t->args  = { std::move(elem) };
         t->shape = std::move(shape);
         return t;
+    }
+
+    static TypePtr tensor(TypePtr elem, std::vector<int> int_shape) {
+        std::vector<Dim> shape;
+        shape.reserve(int_shape.size());
+        for (int d : int_shape) shape.emplace_back(d);
+        return tensor(std::move(elem), std::move(shape));
     }
 
     static TypePtr map(TypePtr key, TypePtr val) {
@@ -151,7 +176,7 @@ struct Type
         if (kind != o.kind)                               return false;
         if (kind == Kind::Named || kind == Kind::Var)
             return type_name == o.type_name;
-        if (kind == Kind::Tensor && shape != o.shape)     return false;
+        if (kind == Kind::Tensor && !dims_compat(shape, o.shape))     return false;
         if (args.size() != o.args.size())                 return false;
         for (size_t i = 0; i < args.size(); ++i)
             if (!(*args[i] == *o.args[i]))                return false;
@@ -187,7 +212,7 @@ struct Type
                     out += ", [";
                     for (size_t i = 0; i < shape.size(); ++i) {
                         if (i) out += ",";
-                        out += std::to_string(shape[i]);
+                        out += dim_str(shape[i]);
                     }
                     out += "]";
                 }
@@ -229,13 +254,13 @@ struct Type
         TyKind tk,
         const std::string& type_name = "",
         std::vector<TypePtr> inner_args = {},
-        std::vector<int> tensor_shape = {});
+        std::vector<Dim> tensor_shape = {});
 
     static TypePtr fromTyKind(
         TyKind                            tk,
         const std::optional<std::string>& type_name,
         std::vector<TypePtr>              inner_args   = {},
-        std::vector<int>                  tensor_shape  = {})
+        std::vector<Dim>                  tensor_shape  = {})
     {
         return fromTyKind(tk,
                           type_name.value_or(""),
@@ -255,7 +280,7 @@ inline TypePtr Type::fromTyKind(
     TyKind              tk,
     const std::string&   type_name,
     std::vector<TypePtr> inner_args,
-    std::vector<int>    tensor_shape)
+    std::vector<Dim>    tensor_shape)
 {
     auto arg = [&](size_t i) -> TypePtr {
         return (i < inner_args.size() && inner_args[i]) ? inner_args[i] : infer();
