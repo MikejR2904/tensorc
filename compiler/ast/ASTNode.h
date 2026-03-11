@@ -7,6 +7,7 @@
 #include <cassert>
 #include "../lexer/Position.h"
 #include "../lexer/TokenKind.h"
+#include "Type.h"
 
 struct Expr;
 struct Stmt;
@@ -165,6 +166,7 @@ struct ExprKind
         ChannelSend,    // ch <- val
         Await,          // await expr
         Grad,           // grad(loss, params)
+        Spawn,          // spawn
         If,             // if as expression
         Match,          // match as expression
         Block,          // { stmts... tail_expr }
@@ -189,6 +191,7 @@ struct ExprKind
     ExprPtr operand;
     ExprPtr                callee;
     std::vector<ExprPtr>   args;
+    ExprPtr spawned_expr;
     ExprPtr index;
     ExprPtr     target;
     std::string member;
@@ -227,6 +230,7 @@ struct ExprKind
             case Tag::Scope:       return target.get();
             case Tag::Unary:       return operand.get();
             case Tag::Await:       return awaited.get();
+            case Tag::Spawn:       return spawned_expr.get();
             case Tag::ChannelSend: return channel.get();
             default:               return nullptr;
         }
@@ -288,6 +292,13 @@ struct ExprKind
         ek.tag = Tag::Call;
         ek.callee = std::move(callee);
         ek.args = std::move(args);
+        return ek;
+    }
+
+    static ExprKind makeSpawn(ExprPtr call_expr) {
+        ExprKind ek;
+        ek.tag = Tag::Spawn;
+        ek.spawned_expr = std::move(call_expr);
         return ek;
     }
 

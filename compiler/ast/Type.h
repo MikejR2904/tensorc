@@ -7,8 +7,8 @@
 #include <variant>
 #include <cassert>
 #include <functional>
-#include "ASTNode.h"
 
+enum class TyKind;
 using Dim = std::variant<int, std::string>;
 inline std::string dim_str(const Dim& d) {
     return std::holds_alternative<int>(d) ? std::to_string(std::get<int>(d)) : std::get<std::string>(d);
@@ -266,15 +266,12 @@ struct Type
         std::vector<Dim> tensor_shape = {});
 
     static TypePtr fromTyKind(
-        TyKind                            tk,
-        const std::optional<std::string>& type_name,
-        std::vector<TypePtr>              inner_args   = {},
-        std::vector<Dim>                  tensor_shape  = {})
+        TyKind tk,
+        const std::optional<std::string>& type_name, 
+        std::vector<TypePtr> inner_args = {},
+        std::vector<Dim> tensor_shape = {})
     {
-        return fromTyKind(tk,
-                          type_name.value_or(""),
-                          std::move(inner_args),
-                          std::move(tensor_shape));
+        return fromTyKind(tk, type_name.value_or(""), std::move(inner_args), std::move(tensor_shape));
     }
 };
 
@@ -283,47 +280,6 @@ inline bool type_compat(const TypePtr& a, const TypePtr& b) {
     if (a->is_infer()) return true;
     if (b->is_infer()) return true;
     return *a == *b;
-}
-
-inline TypePtr Type::fromTyKind(
-    TyKind              tk,
-    const std::string&   type_name,
-    std::vector<TypePtr> inner_args,
-    std::vector<Dim>    tensor_shape)
-{
-    auto arg = [&](size_t i) -> TypePtr {
-        return (i < inner_args.size() && inner_args[i]) ? inner_args[i] : infer();
-    };
-    switch (tk) {
-        case TyKind::I32:     return i32();
-        case TyKind::I64:     return i64();
-        case TyKind::F32:     return f32();
-        case TyKind::F64:     return f64();
-        case TyKind::Bool:    return bool_();
-        case TyKind::Str:     return str_();
-        case TyKind::Void:    return void_();
-        case TyKind::Infer:   return infer();
-        case TyKind::FnType:  {
-            if (inner_args.empty()) return fn({}, void_());
-            TypePtr ret = inner_args.back();
-            inner_args.pop_back();
-            return fn(std::move(inner_args), std::move(ret));
-        }
-        case TyKind::Generic: return var(type_name.empty() ? "T" : type_name);
-        case TyKind::UserDef: return named(type_name);
-        case TyKind::Array:   return array(arg(0));
-        case TyKind::Tensor:  {
-            TypePtr elem = (inner_args.empty() || !inner_args[0])
-                         ? f32() : inner_args[0];
-            return tensor(std::move(elem), std::move(tensor_shape));
-        }
-        case TyKind::Map:     return map(arg(0), arg(1));
-        case TyKind::Set:     return set(arg(0));
-        case TyKind::Queue:   return queue(arg(0));
-        case TyKind::Stack:   return stack(arg(0));
-        case TyKind::Tuple:   return tuple(std::move(inner_args));
-        default:              return infer();
-    }
 }
 
 struct BuiltinEntry {

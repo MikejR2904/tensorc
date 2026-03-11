@@ -54,6 +54,7 @@ StmtPtr Parser::parseStatement()
     switch (current.kind)
     {
         case TokenKind::KW_LET:    return parseLet();
+        case TokenKind::KW_ASYNC:
         case TokenKind::KW_FN:     return parseFnDecl();
         case TokenKind::KW_RETURN: return parseReturn();
         case TokenKind::KW_IF:     return parseIf();
@@ -158,6 +159,10 @@ StmtPtr Parser::parseLet()
 StmtPtr Parser::parseFnDecl()
 {
     Position p = current.pos;
+    bool is_async = false;
+    if (match(TokenKind::KW_ASYNC)) {
+        is_async = true;
+    }
     expect(TokenKind::KW_FN, "expected 'fn'");
     if (!check(TokenKind::IDENTIFIER))
         throw error("expected function name after 'fn'");
@@ -186,6 +191,7 @@ StmtPtr Parser::parseFnDecl()
     Ident fn_ident = Ident::unqual(IdentInfo{ fn_name, ret_ty, IdentCtx::FuncDef, name_pos, ret_utn });
     Func  func(std::move(fn_ident), std::move(params), std::move(body));
     func.generic_names = std::move(generic_names);
+    func.is_async = is_async;
     StmtKind k;
     k.tag  = StmtKind::Tag::Func;
     k.func = std::move(func);
@@ -297,12 +303,17 @@ StmtPtr Parser::parseImport()
 {
     Position p = current.pos;
     expect(TokenKind::KW_IMPORT, "expected 'import'");
-    if (!check(TokenKind::STRING))
-        throw error("expected string path after 'import'");
     StmtKind k;
     k.tag         = StmtKind::Tag::Import;
-    k.import_path = current.value;
-    advance();
+    if (check(TokenKind::STRING) || check(TokenKind::IDENTIFIER))
+    {
+        k.import_path = current.value;
+        advance();
+    }
+    else 
+    {
+        throw error("expected string path or identifier after 'import'");
+    }
     if (match(TokenKind::KW_AS))
     {
         if (!check(TokenKind::IDENTIFIER))
@@ -634,6 +645,18 @@ ExprPtr Parser::parsePostfix()
         {
             expr = parseChannelSend(std::move(expr));
         }
+        else if (check(TokenKind::LBRACE)) 
+        {
+            if (expr->kind.tag == ExprKind::Tag::Id)
+            {
+                std::string struct_name = expr->kind.id.info.name;
+                expr = parseStructLit(struct_name, expr->pos);
+            }
+            else
+            {
+                break; 
+            }
+        }
         else
         {
             break;
@@ -664,6 +687,7 @@ ExprPtr Parser::parsePrimary()
         case TokenKind::KW_MATCH:   return parseMatchExpr();
         case TokenKind::LBRACE:     return parseBlockExpr();
         case TokenKind::KW_FN:      return parseFnExpr();
+        case TokenKind::KW_SPAWN:   return parseSpawnExpr();
         case TokenKind::KW_AWAIT:   return parseAwait();
         case TokenKind::KW_GRAD:    return parseGrad();
         default:
@@ -709,6 +733,38 @@ ExprPtr Parser::parseBoolLit()
     k.lit = LitKind::makeBool(current.kind == TokenKind::KW_TRUE);
     Position p = current.pos;
     advance();
+    return makeExpr(std::move(k), p);
+}
+
+ExprPtr Parser::parseStructLit(const std::string& name, Position p)
+{
+    expect(TokenKind::LBRACE, "expected '{' for struct literal");
+    
+    std::vector<std::pair<std::string, ExprPtr>> fields;
+    
+    while (!check(TokenKind::RBRACE) && !check(TokenKind::EOF_TOKEN))
+    {
+        if (!check(TokenKind::IDENTIFIER))
+            throw error("expected field name in struct literal");
+            
+        std::string field_name = current.value;
+        advance();
+        
+        expect(TokenKind::COLON, "expected ':' after field name");
+        
+        ExprPtr val = parseExpr();
+        fields.push_back({field_name, std::move(val)});
+        
+        if (!match(TokenKind::COMMA))
+            break;
+    }
+    
+    expect(TokenKind::RBRACE, "expected '}' after struct literal");
+    ExprKind k;
+    k.tag = ExprKind::Tag::StructLit; // Double check this Tag exists in your AST!
+    k.struct_init_name = name;
+    k.struct_init_fields = std::move(fields);
+    
     return makeExpr(std::move(k), p);
 }
 
@@ -818,6 +874,17 @@ ExprPtr Parser::parseFnExpr()
     k.fn_body = parseCompound();
 
     return makeExpr(std::move(k), p);
+}
+
+ExprPtr Parser::parseSpawnExpr()
+{
+    Position p = current.pos;
+    advance(); // consume 'spawn'
+    ExprPtr call = parsePostfix(); 
+    if (call->kind.tag != ExprKind::Tag::Call) {
+        throw error("expected function call after 'spawn'");
+    }
+    return makeExpr(ExprKind::makeSpawn(std::move(call)), p);
 }
 
 ExprPtr Parser::parseAwait()

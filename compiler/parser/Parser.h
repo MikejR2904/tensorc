@@ -72,6 +72,7 @@ private:
     ExprPtr parseIfExpr();
     ExprPtr parseMatchExpr();
     ExprPtr parseFnExpr();
+    ExprPtr parseSpawnExpr();
     ExprPtr parseBlockExpr();
     ExprPtr parseAwait();
     ExprPtr parseGrad();
@@ -83,6 +84,7 @@ private:
     ExprPtr parseQueueLit();
     ExprPtr parseStackLit();
     ExprPtr parseTupleLit();
+    ExprPtr parseStructLit(const std::string& name, Position p);
     std::vector<std::vector<ExprPtr>> parseTensorRows();
     TyKind       parseType();
     GenericParams parseGenericParams();

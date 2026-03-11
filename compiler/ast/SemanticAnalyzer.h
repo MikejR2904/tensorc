@@ -23,7 +23,6 @@ public:
     explicit SemanticAnalyzer(ImportRegistry imports = ImportRegistry::with_builtins()) 
         : symb_tab(), import_reg(std::move(imports)) {}
 
-    SemanticAnalyzer() : symb_tab() {}
     void validate(Program& program) {
         try {
             for (auto& stmt : program.stmts)
@@ -50,6 +49,7 @@ private:
     std::vector<AsyncCtx> async_stack;
 
     bool in_async() const { return !async_stack.empty(); }
+    bool is_in_async_fn() const { return !async_stack.empty() && async_stack.back() == AsyncCtx::AsyncFn; }
 
     struct AsyncGuard {
         std::vector<AsyncCtx>& stk;
@@ -172,7 +172,7 @@ private:
         Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos);
         if (var_ty && var_ty->kind == Type::Kind::Tensor) {
             const auto& utn = stmt->kind.let_ident.user_type_name();
-            sym.requires_grad = (!utn->empty() && utn == "@grad");
+            sym.requires_grad = (utn.has_value() && *utn == "@grad");
         }
         symb_tab.define(sym);
         return var_ty;
@@ -185,7 +185,8 @@ private:
             p_tys.push_back(Type::fromTyKind(p.ty_kind(), p.user_type_name()));
         }
         TypePtr ret = Type::fromTyKind(func.ident.ty_kind(), func.ident.user_type_name());
-        TypePtr fn_ty = Type::fn(p_tys, ret);
+        TypePtr effective_ret = func.is_async ? Type::task(ret) : ret;
+        TypePtr fn_ty = Type::fn(p_tys, effective_ret);
         if (!existing) {
             symb_tab.define(Symbol(func.ident.name(), fn_ty, IdentCtx::FuncDef, func.ident.pos()));
         }
@@ -219,6 +220,19 @@ private:
         expected_ret_ty = old_expect;
         symb_tab.popScope();
         return fn_ty;
+    }
+
+    TypePtr validate_await(Expr* expr, Position pos) {
+        if (!in_async()) {
+            error("'await' used outside of an async context. "
+                "Mark the enclosing function 'async fn' or wrap in 'spawn'.", pos);
+        }
+        TypePtr inner = validate_expr(expr);
+        if (inner->kind != Type::Kind::Task) {
+            error("Cannot await non-task type (got " + inner->str() + ")", pos);
+            return Type::infer();
+        }
+        return inner->elem_type(); 
     }
 
     // --- Expression Validation ---
@@ -469,6 +483,12 @@ private:
                 }
                 return found->type;
             }
+            case ExprKind::Tag::Spawn: {
+                Expr* sub_expr = expr->kind.spawned_expr.get();
+                AsyncGuard _ag(async_stack, AsyncCtx::Spawn);
+                TypePtr inner_ty = validate_expr(sub_expr);
+                return Type::task(inner_ty ? inner_ty : Type::void_());
+            }
             case ExprKind::Tag::Range: { // lo..hi
                 TypePtr lo = validate_expr(expr->kind.lhs.get());
                 TypePtr hi = validate_expr(expr->kind.rhs.get());
@@ -480,20 +500,7 @@ private:
                 validate_expr(expr->kind.send_val.get());
                 return Type::void_();
             }
-            case ExprKind::Tag::Await: {
-                if (!in_async())
-                    error("'await' used outside of an async context. "
-                          "Mark the enclosing function 'async fn' or wrap in 'spawn'.",
-                          expr->pos);
-                TypePtr operand_ty = validate_expr(expr->kind.awaited.get());
-                if (!operand_ty || operand_ty->is_infer()) return Type::infer();
-                if (operand_ty->kind != Type::Kind::Task)
-                    error("'await' requires a Task<T> operand, got " +
-                          operand_ty->str() + ". "
-                          "Did you forget to 'spawn' the expression?",
-                          expr->pos);
-                return operand_ty->inner_type();
-            }
+            case ExprKind::Tag::Await: { return validate_await(expr->kind.awaited.get(), expr->pos); }
             case ExprKind::Tag::FnExpr: { // fn(x:T)->T { }
                 symb_tab.pushScope();
                 TypePtr saved_ret = expected_ret_ty;
@@ -709,13 +716,25 @@ private:
                           "Tensor broadcast: scalar type must match element type");
             return r;
         }
-        // Standard Arithmetic/Logical Compatibility
-        expect_compat(l, r, pos, "Binary operator type mismatch");
         // Comparison operators return Bool
         if (op == BinOp::Eq || op == BinOp::Neq || op == BinOp::Lt || op == BinOp::Gt || op == BinOp::Lte|| op == BinOp::Gte) {
             return Type::bool_();
         }
-        return l;
+        if (l->is_numeric() || r->is_numeric()) {
+            // If one side is concrete and the other is Infer, 
+            // we can safely "unify" them to the concrete type.
+            if (l->is_infer()) return r;
+            if (r->is_infer()) return l;
+
+            // If both are concrete, ensure they match
+            if (!type_compat(l, r)) {
+                error("Binary operator type mismatch — RHS is " + r->str() + 
+                    " but LHS expects " + l->str(), pos);
+            }
+            return l; // Return the concrete type (e.g., f32)
+        }
+        expect_compat(l, r, pos, "Binary operator type mismatch");
+        return Type::infer();
     }
 
     TypePtr validate_call(Expr* expr) {
@@ -948,17 +967,13 @@ private:
 
     void expect_compat(const TypePtr& expected, const TypePtr& actual, Position pos, const std::string& ctx) {
         if (!expected || !actual) return;
-        if (expected->is_infer() && actual->is_infer()) return; // both unknown → ok
-        if (!expected->is_infer()) {
-            error(ctx + " — RHS is infer but LHS expects concrete type " + expected->str(), pos);
-        }
-        if (!actual->is_infer()) {
-            error(ctx + " — LHS is infer but RHS is concrete " + actual->str(), pos);
+        if (expected->is_infer() || actual->is_infer()) {
+            return;
         }
         if (expected->kind == Type::Kind::Var || actual->kind == Type::Kind::Var) return;
         if (!type_compat(expected, actual))
             error(ctx + " (expected " + expected->str() + ", got " + actual->str() + ")", pos);
-        }
+    }
 
     using SubstMap = std::unordered_map<std::string, TypePtr>;
     
