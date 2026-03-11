@@ -14,7 +14,8 @@
 struct StructDef {
     std::string name;
     std::unordered_map<std::string, TypePtr> fields;
-    
+    std::unordered_map<std::string, Position> field_positions;
+    Position def_pos;
 };
 
 class SemanticAnalyzer {
@@ -44,11 +45,17 @@ private:
     std::unordered_map<std::string, StructDef> struct_registry;
     TypePtr expected_ret_ty = Type::void_();
     int iteration_depth = 0;
-    int async_depth = 0;
-    void register_struct(const StructDef& def)
-    {
-        struct_registry[def.name] = std::move(def);
-    }
+    
+    enum class AsyncCtx { AsyncFn, Spawn };
+    std::vector<AsyncCtx> async_stack;
+
+    bool in_async() const { return !async_stack.empty(); }
+
+    struct AsyncGuard {
+        std::vector<AsyncCtx>& stk;
+        AsyncGuard(std::vector<AsyncCtx>& s, AsyncCtx ctx) : stk(s) { stk.push_back(ctx); }
+        ~AsyncGuard() { stk.pop_back(); }
+    };
 
     void register_top_level(Stmt* stmt)
     {
@@ -56,11 +63,13 @@ private:
         {
             StructDef def;
             def.name = stmt->kind.struct_name;
+            def.def_pos = stmt->pos;
             for (auto& f : stmt->kind.struct_fields) {
                 TypePtr field_ty = Type::fromTyKind(f.ty, f.user_type_name);
                 def.fields[f.name] = std::move(field_ty);
+                def.field_positions[f.name] = f.pos;
             }
-            register_struct(def);
+            struct_registry[def.name] = std::move(def);
         }
         if (stmt->kind.tag == StmtKind::Tag::Func && stmt->kind.func.has_value())
         {
@@ -78,8 +87,17 @@ private:
     }
 
     // --- Statement Validation ---
-    TypePtr validate_stmt(Stmt* stmt) {
-        if (!stmt) return Type::void_();
+    TypePtr validate_stmt(Stmt* stmt, bool* always_returns = nullptr)
+    {
+        if (!stmt) { if (always_returns) *always_returns = false; return Type::void_(); }
+        bool local_ret = false;
+        TypePtr result = validate_stmt_inner(stmt, local_ret);
+        if (always_returns) *always_returns = local_ret;
+        return result;
+    }
+
+    TypePtr validate_stmt_inner(Stmt* stmt, bool& always_returns) {
+        always_returns = false;
         switch (stmt->kind.tag) {
             case StmtKind::Tag::Let: return validate_let(stmt);
             case StmtKind::Tag::Func: {
@@ -92,11 +110,20 @@ private:
                 TypePtr actual = stmt->kind.ret_expr
                     ? validate_expr(stmt->kind.ret_expr.get())
                     : Type::void_();
-                expect_compat(expected_ret_ty, actual, stmt->pos, "Return type mismatch");           
+                expect_compat(expected_ret_ty, actual, stmt->pos, "Return type mismatch");
+                always_returns = true;           
                 return actual;
             }
-            case StmtKind::Tag::If: return validate_if(stmt);
-            case StmtKind::Tag::Else: return validate_compound(stmt->kind.else_body, false);
+            case StmtKind::Tag::If: {
+                bool then_ret = false, else_ret = false;
+                TypePtr ty = validate_if(stmt, &then_ret, &else_ret);
+                always_returns = then_ret && else_ret;
+                return ty;
+            }
+            case StmtKind::Tag::Else: {
+                TypePtr ty = validate_compound(stmt->kind.else_body, false, &always_returns);
+                return ty;
+            }
             case StmtKind::Tag::While: return validate_while(stmt);
             case StmtKind::Tag::For: return validate_for(stmt);
             case StmtKind::Tag::Compound: return validate_compound(stmt->kind.compound, false);
@@ -130,21 +157,17 @@ private:
         TyKind  ann_k  = stmt->kind.let_ident.ty_kind();
         TypePtr var_ty;
         if (ann_k == TyKind::Infer) {
-            var_ty = rhs_ty;
+            var_ty = rhs_ty ? rhs_ty : Type::infer();
             stmt->kind.let_ident.set_ty_kind(rhs_ty ? tkFromType(rhs_ty) : TyKind::Infer);
         } else {
-            bool propagate_elem = (ann_k == TyKind::Array  ||
-                                   ann_k == TyKind::Tensor ||
-                                   ann_k == TyKind::Set    ||
-                                   ann_k == TyKind::Queue  ||
-                                   ann_k == TyKind::Stack);
-            std::vector<TypePtr> inner;
-            if (propagate_elem && rhs_ty) inner.push_back(rhs_ty);
-            var_ty = Type::fromTyKind(
-                ann_k,
-                stmt->kind.let_ident.user_type_name(),  // struct name if UserDef
-                std::move(inner));
-            expect_compat(var_ty, rhs_ty, stmt->pos, "Variable '" + stmt->kind.let_ident.name() + "' type mismatch");
+            TypePtr ann_ty = Type::fromTyKind(ann_k, stmt->kind.let_ident.user_type_name(), {}); 
+            expect_compat(ann_ty, rhs_ty, stmt->pos,
+                "Variable '" + stmt->kind.let_ident.name() +
+                "' annotated as " + ann_ty->str() + " but RHS has type");
+            var_ty = ann_ty;
+            if (rhs_ty && !rhs_ty->is_infer() && type_compat(rhs_ty, ann_ty)) {
+                var_ty = rhs_ty;  // keep more precise inferred type when safe
+            }
         }
         Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos);
         if (var_ty && var_ty->kind == Type::Kind::Tensor) {
@@ -169,16 +192,30 @@ private:
         symb_tab.pushScope();
         TypePtr old_expect = expected_ret_ty;
         expected_ret_ty = ret;
-        if (func.is_async) async_depth++;
+
+        std::unique_ptr<AsyncGuard> async_guard;
+        if (func.is_async) async_guard = std::make_unique<AsyncGuard>(async_stack, AsyncCtx::AsyncFn);
         // Register parameters in function scope
         for (auto& param : func.params) {
-            symb_tab.define(Symbol(param.name(), Type::fromTyKind(param.ty_kind(), param.user_type_name()), IdentCtx::Param, param.pos()));
+            TypePtr pt = Type::fromTyKind(param.ty_kind(), param.user_type_name());
+            Symbol psym(param.name(), pt, IdentCtx::Param, param.pos());
+            psym.is_mutable    = false;
+            psym.requires_grad = (pt && pt->kind == Type::Kind::Tensor);
+            symb_tab.define(psym);
         }
-        TypePtr body_ret_ty = validate_compound(func.body, true);
-        if (func.is_async) async_depth--;
+        bool    always_returns = false;
+        TypePtr body_ty = validate_compound(func.body, true, &always_returns);
         // Ensure return type matches
-        if (!ret->is_void())
-            expect_compat(ret, body_ret_ty, func.ident.pos(), "Function '" + func.ident.name() + "' return type mismatch");
+        if (!ret->is_void()) {
+            bool has_implicit_return = !body_ty->is_void();
+            if (!has_implicit_return && !always_returns)
+                error("Function '" + func.ident.name() + "' is declared -> " +
+                      ret->str() + " but may reach end without returning a value",
+                      func.ident.pos());
+            if (!body_ty->is_void())
+                expect_compat(ret, body_ty, func.ident.pos(),
+                              "Function '" + func.ident.name() + "' return type mismatch");
+        }
         expected_ret_ty = old_expect;
         symb_tab.popScope();
         return fn_ty;
@@ -263,8 +300,49 @@ private:
                         elem = Type::fromTyKind(gp.type_params[0]);
                     shape.reserve(gp.shape.size());
                     for (int d : gp.shape) shape.emplace_back(d);
+                    for (auto& row : expr->kind.rows)
+                        for (auto& e : row) validate_expr(e.get());
+                    for (auto& e : expr->kind.elements)
+                        validate_expr(e.get());
+                } else if (!expr->kind.rows.empty()) {
+                    int  n_rows = static_cast<int>(expr->kind.rows.size());
+                    int  n_cols = static_cast<int>(expr->kind.rows[0].size());
+                    shape = { Dim(n_rows), Dim(n_cols) };
+                    TypePtr first_elem;
+                    for (auto& row : expr->kind.rows) {
+                        if (static_cast<int>(row.size()) != n_cols)
+                            error("Tensor rows must all have the same length "
+                                  "(expected " + std::to_string(n_cols) +
+                                  ", got " + std::to_string(row.size()) + ")",
+                                  expr->pos);
+                        for (auto& e : row) {
+                            TypePtr et = validate_expr(e.get());
+                            if (!first_elem && !et->is_infer()) {
+                                first_elem = et;
+                                elem = et;
+                            } else if (first_elem) {
+                                expect_compat(first_elem, et, e->pos,
+                                              "Tensor element type mismatch");
+                            }
+                        }
+                    }
+                } else if (!expr->kind.elements.empty()) {
+                    // 1-D literal:  [a, b, c]
+                    int n = static_cast<int>(expr->kind.elements.size());
+                    shape = { Dim(n) };
+                    TypePtr first_elem;
+                    for (auto& e : expr->kind.elements) {
+                        TypePtr et = validate_expr(e.get());
+                        if (!first_elem && !et->is_infer()) {
+                            first_elem = et;
+                            elem = et;
+                        } else if (first_elem) {
+                            expect_compat(first_elem, et, e->pos,
+                                          "Tensor element type mismatch");
+                        }
+                    }
                 }
-                return Type::tensor(elem, shape);
+                return Type::tensor(elem, std::move(shape));
             }
             case ExprKind::Tag::ArrayLit: {
                 if (expr->kind.elements.empty()) return Type::array(Type::infer());
@@ -328,66 +406,19 @@ private:
                 TypePtr obj_ty = validate_expr(expr->kind.target.get());
                 if (!obj_ty || obj_ty->is_infer()) return Type::infer();
                 const std::string& mem = expr->kind.member;
-                if (obj_ty->kind == Type::Kind::Tensor) {
-                    // Data attributes
-                    if (mem == "shape") return Type::array(Type::i32());
-                    if (mem == "rank")  return Type::i32();
-                    if (mem == "size")  return Type::i32();
-                    if (mem == "dtype") return Type::str_();
-                    // Reduction methods  →  fn() -> elem_type
-                    if (mem == "sum"  || mem == "mean" ||
-                        mem == "min"  || mem == "max"  || mem == "prod")
-                        return Type::fn({}, obj_ty->elem_type());
-                    // Shape manipulation  →  fn() -> Tensor<elem>
-                    if (mem == "flatten" || mem == "contiguous" || mem == "clone")
-                        return Type::fn({}, obj_ty);
-                    if (mem == "T")       // transpose
-                        return obj_ty;
-                    // Gradient-related
-                    if (mem == "grad")
-                        return Type::tensor(obj_ty->elem_type());
-                    if (mem == "detach")
-                        return Type::fn({}, obj_ty);
-                    if (mem == "requires_grad")
-                        return Type::bool_();
-                    // Indexing
-                    if (mem == "item")
-                        return obj_ty->elem_type();
-                    error("Tensor has no attribute '" + mem + "'", expr->pos);
-                }
-                if (obj_ty->kind == Type::Kind::Array) {
-                    if (mem == "len")  return Type::i32();
-                    if (mem == "push") return Type::fn({obj_ty->elem_type()}, Type::void_());
-                    if (mem == "pop")  return Type::fn({}, obj_ty->elem_type());
-                    if (mem == "is_empty") return Type::bool_();
-                    error("Array has no attribute '" + mem + "'", expr->pos);
-                }
-                if (obj_ty->kind == Type::Kind::Map) {
-                    if (mem == "len")      return Type::i32();
-                    if (mem == "is_empty") return Type::bool_();
-                    if (mem == "keys")     return Type::array(obj_ty->key_type());
-                    if (mem == "values")   return Type::array(obj_ty->val_type());
-                    if (mem == "contains") return Type::fn({obj_ty->key_type()}, Type::bool_());
-                    if (mem == "get")      return Type::fn({obj_ty->key_type()}, obj_ty->val_type());
-                    if (mem == "insert")   return Type::fn({obj_ty->key_type(), obj_ty->val_type()}, Type::void_());
-                    if (mem == "remove")   return Type::fn({obj_ty->key_type()}, Type::void_());
-                    error("Map has no attribute '" + mem + "'", expr->pos);
-                }
-                if (obj_ty->kind == Type::Kind::Str) {
-                    if (mem == "len")      return Type::i32();
-                    if (mem == "is_empty") return Type::bool_();
-                    if (mem == "to_upper" || mem == "to_lower" || mem == "trim")
-                        return Type::fn({}, Type::str_());
-                    if (mem == "contains") return Type::fn({Type::str_()}, Type::bool_());
-                    if (mem == "split")    return Type::array(Type::str_());
-                    if (mem == "parse_i32") return Type::i32();
-                    if (mem == "parse_f32") return Type::f32();
-                    error("Str has no attribute '" + mem + "'", expr->pos);
-                }
-                if (obj_ty->kind == Type::Kind::Task) {
-                    if (mem == "is_done")  return Type::bool_();
-                    if (mem == "cancel")   return Type::fn({}, Type::void_());
-                    error("Task has no attribute '" + mem + "'", expr->pos);
+                if (TypePtr bt = lookup_builtin(obj_ty, mem))
+                    return bt;
+                bool is_builtin_receiver =
+                    obj_ty->kind == Type::Kind::Tensor ||
+                    obj_ty->kind == Type::Kind::Array  ||
+                    obj_ty->kind == Type::Kind::Map    ||
+                    obj_ty->kind == Type::Kind::Str    ||
+                    obj_ty->kind == Type::Kind::Task;
+                if (is_builtin_receiver) {
+                    std::string known = builtin_members_for(obj_ty->kind);
+                    error(obj_ty->str() + " has no attribute '" + mem + "'" +
+                          (known.empty() ? "" : ". Available: " + known),
+                          expr->pos);
                 }
                 if (obj_ty->kind == Type::Kind::Named) {
                     const std::string& sname = obj_ty->type_name;
@@ -400,14 +431,12 @@ private:
                               expr->pos);
                     return fit->second;
                 }
-
                 return Type::infer();
             }
             case ExprKind::Tag::Scope: { // expr::member
                 if (!expr->kind.target || expr->kind.target->kind.tag != ExprKind::Tag::Id)
                 {
-                    validate_expr(expr->kind.target.get());
-                    return Type::infer();  // chained scope — future work
+                    error("Left-hand side of :: must be a simple module/namespace identifier", expr->pos);
                 }
                 const std::string& alias = expr->kind.target->kind.id.name();
                 const std::string& sym   = expr->kind.member;
@@ -452,7 +481,7 @@ private:
                 return Type::void_();
             }
             case ExprKind::Tag::Await: {
-                if (async_depth == 0)
+                if (!in_async())
                     error("'await' used outside of an async context. "
                           "Mark the enclosing function 'async fn' or wrap in 'spawn'.",
                           expr->pos);
@@ -476,7 +505,8 @@ private:
                     p_tys.push_back(pt);
                     symb_tab.define(Symbol(param.first, pt, IdentCtx::Param, expr->pos));
                 }
-                TypePtr body_ty = validate_compound(expr->kind.fn_body, true);
+                bool always_returns = false;
+                TypePtr body_ty = validate_compound(expr->kind.fn_body, true, &always_returns);
                 if (!ret_ann->is_void())
                     expect_compat(ret_ann, body_ty, expr->pos, "Lambda return type mismatch");
                 expected_ret_ty = saved_ret;
@@ -532,11 +562,18 @@ private:
                                   "' type mismatch");
                 }
                 // Check for missing required fields
+                std::vector<std::string> missing;
                 for (auto& [fname, _] : def.fields) {
                     if (seen_fields.find(fname) == seen_fields.end())
-                        error("Missing field '" + fname +
-                              "' in struct literal for '" + sname + "'",
-                              expr->pos);
+                        missing.push_back(fname);
+                }
+                if (!missing.empty()) {
+                    std::string msg = "Missing fields in struct literal for '" + sname + "': ";
+                    for (size_t i = 0; i < missing.size(); ++i) {
+                        if (i > 0) msg += ", ";
+                        msg += missing[i];
+                    }
+                    error(msg, expr->pos);
                 }
                 return Type::named(sname);
             }
@@ -591,10 +628,81 @@ private:
             expect_compat(Type::bool_(), r, pos, "Right operand of && / || must be bool");
             return Type::bool_();
         }
+        if (l->kind == Type::Kind::Tensor && r->kind == Type::Kind::Tensor) {
+            const auto& ls = l->shape;
+            const auto& rs = r->shape;
+            if (!ls.empty() && !rs.empty()) {
+                size_t max_rank = std::max(ls.size(), rs.size());
+                auto dim_is_broadcastable = [](const Dim& d) -> bool {
+                    if (std::holds_alternative<std::string>(d)) return true;
+                    return std::get<int>(d) == 1;
+                };
+                auto dims_broadcast_compat = [&](const Dim& a, const Dim& b) -> bool {
+                    if (std::holds_alternative<std::string>(a)) return true;
+                    if (std::holds_alternative<std::string>(b)) return true;
+                    int ia = std::get<int>(a);
+                    int ib = std::get<int>(b);
+                    return ia == 1 || ib == 1 || ia == ib;
+                };
+                auto broadcast_dim = [](const Dim& a, const Dim& b) -> Dim {
+                    // Symbolic wins — it could be any value at runtime.
+                    if (std::holds_alternative<std::string>(a)) return a;
+                    if (std::holds_alternative<std::string>(b)) return b;
+                    return Dim(std::max(std::get<int>(a), std::get<int>(b)));
+                };
+                // Check compatibility right-to-left (broadcast alignment).
+                bool compatible = true;
+                for (size_t i = 0; i < max_rank; ++i) {
+                    Dim ld = (i < ls.size()) ? ls[ls.size() - 1 - i] : Dim(1);
+                    Dim rd = (i < rs.size()) ? rs[rs.size() - 1 - i] : Dim(1);
+                    if (!dims_broadcast_compat(ld, rd)) { compatible = false; break; }
+                }
+                if (!compatible) {
+                    auto shape_str = [](const std::vector<Dim>& sh) {
+                        std::string s = "[";
+                        for (size_t i = 0; i < sh.size(); ++i) {
+                            if (i) s += ", ";
+                            s += dim_str(sh[i]);
+                        }
+                        return s + "]";
+                    };
+                    error("Tensor shapes not broadcast-compatible: " +
+                          shape_str(ls) + " vs " + shape_str(rs), pos);
+                }
+                // Compute result shape aligned from the right.
+                std::vector<Dim> result_shape(max_rank);
+                for (size_t i = 0; i < max_rank; ++i) {
+                    Dim ld = (i < ls.size()) ? ls[ls.size() - 1 - i] : Dim(1);
+                    Dim rd = (i < rs.size()) ? rs[rs.size() - 1 - i] : Dim(1);
+                    result_shape[max_rank - 1 - i] = broadcast_dim(ld, rd);
+                }
+                // Element type: standard numeric promotion.
+                TypePtr le = l->elem_type();
+                TypePtr re = r->elem_type();
+                TypePtr common_elem;
+                if (!le->is_infer() && !re->is_infer()) {
+                    if (le->kind == Type::Kind::F64 || re->kind == Type::Kind::F64)
+                        common_elem = Type::f64();
+                    else if (le->kind == Type::Kind::F32 || re->kind == Type::Kind::F32)
+                        common_elem = Type::f32();
+                    else if (le->kind == Type::Kind::I64 || re->kind == Type::Kind::I64)
+                        common_elem = Type::i64();
+                    else if (le->is_numeric() || re->is_numeric())
+                        common_elem = Type::i32();
+                    else {
+                        expect_compat(le, re, pos, "Incompatible element types in tensor operation");
+                        common_elem = le;
+                    }
+                } else {
+                    common_elem = le->is_infer() ? re : le;
+                }
+                return Type::tensor(common_elem, std::move(result_shape));
+            }
+        }
         if (l->kind == Type::Kind::Tensor && r->kind != Type::Kind::Tensor) {
             expect_compat(l->elem_type(), r, pos,
-                          "Tensor broadcast: scalar type must match element type");
-            return l;   // result has same shape and elem type as the tensor
+                      "Cannot broadcast scalar to tensor element type");
+            return l;
         }
         if (r->kind == Type::Kind::Tensor && l->kind != Type::Kind::Tensor) {
             expect_compat(r->elem_type(), l, pos,
@@ -611,39 +719,34 @@ private:
     }
 
     TypePtr validate_call(Expr* expr) {
-        Expr* callee = expr->kind.callee.get();
-        if (!callee || callee->kind.tag != ExprKind::Tag::Id)
-            return Type::infer();
-        const std::string& fn_name = callee->kind.id.name();
-        Symbol* s = symb_tab.lookup(fn_name);
-        if (!s) error("Calling undefined function '" + fn_name + "'", expr->pos);
-        auto& args = expr->kind.args;
-        if (s->type && s->type->kind == Type::Kind::Fn) {
-            auto params = s->type->param_types();
-            if (args.size() != params.size())
-                error("Function '" + fn_name + "' expects " +
-                    std::to_string(params.size()) +
-                    " argument(s), got " + std::to_string(args.size()),
-                    expr->pos);
-            SubstMap subst;
-            std::vector<TypePtr> actual_tys;
-            actual_tys.reserve(args.size());
-            for (size_t i = 0; i < args.size(); ++i) {
-                TypePtr actual = validate_expr(args[i].get());
-                actual_tys.push_back(actual);
-                collect_subst(params[i], actual, subst, args[i]->pos);
-            }
-            for (size_t i = 0; i < args.size(); ++i) {
-                TypePtr expected = apply_subst(params[i], subst);
-                expect_compat(expected, actual_tys[i], args[i]->pos,
-                              "Argument " + std::to_string(i + 1) +
-                              " of '" + fn_name + "' type mismatch");
-            }
-            return apply_subst(s->type->ret_type(), subst);
+        TypePtr callee_ty = validate_expr(expr->kind.callee.get());
+        if (!callee_ty->is_infer() && callee_ty->kind != Type::Kind::Fn) {
+            error("Attempt to call non-function (got " + callee_ty->str() + ")", expr->pos);
         }
-        for (auto& arg : args)
-            validate_expr(arg.get());
-        return s->type ? s->type : Type::infer();
+        // If infer → assume function type for now (better error later if misused)
+        if (callee_ty->is_infer()) {
+            for (auto& arg : expr->kind.args) validate_expr(arg.get());
+            return Type::infer();
+        }
+        auto params = callee_ty->param_types();
+        auto& args  = expr->kind.args;
+        if (args.size() != params.size()) {
+            error("Function expects " + std::to_string(params.size()) +
+                  " arguments, got " + std::to_string(args.size()), expr->pos);
+        }
+        SubstMap subst;
+        std::vector<TypePtr> actual_tys;
+        for (size_t i = 0; i < args.size(); ++i) {
+            TypePtr actual = validate_expr(args[i].get());
+            actual_tys.push_back(actual);
+            collect_subst(params[i], actual, subst, args[i]->pos);
+        }
+        for (size_t i = 0; i < args.size(); ++i) {
+            TypePtr expected = apply_subst(params[i], subst);
+            expect_compat(expected, actual_tys[i], args[i]->pos,
+                          "Argument " + std::to_string(i+1) + " type mismatch");
+        }
+        return apply_subst(callee_ty->ret_type(), subst);
     }
 
     TypePtr validate_pipe(Expr* expr) {
@@ -705,17 +808,29 @@ private:
 
     // --- Helpers ---
 
-    TypePtr validate_compound(Compound& comp, bool scope_already_pushed) {
+    TypePtr validate_compound(Compound& comp, bool scope_already_pushed, bool* always_returns = nullptr, bool as_expr = false) {
         if (!scope_already_pushed) symb_tab.pushScope();
-        TypePtr last_ty = Type::void_();
+        TypePtr body_ty  = Type::void_();
+        bool any_ret = false;
+        bool seen_ret = false;
         for (auto& s : comp.stmts) {
-            last_ty = validate_stmt(s.get());
+            if (seen_ret && !as_expr) error("Unreachable statement after return/break/continue", s->pos);
+            bool stmt_ret = false;
+            TypePtr sty = validate_stmt(s.get(), &stmt_ret);
+            if (stmt_ret) {
+                seen_ret = true; any_ret = true; body_ty = sty;
+            } else if (!seen_ret) body_ty = sty;
         }
         if (comp.tail_expr) {
-            last_ty = validate_expr(comp.tail_expr.get());
+            if (seen_ret && !as_expr) {
+                error("Unreachable tail expression after return", comp.tail_expr->pos);
+            }
+            body_ty  = validate_expr(comp.tail_expr.get());
+            any_ret = true;
         }
         if (!scope_already_pushed) symb_tab.popScope();
-        return last_ty;
+        if (always_returns) *always_returns = any_ret;
+        return body_ty;
     }
 
     void validate_structs()
@@ -723,37 +838,45 @@ private:
         // colour map — all start white (absent from map)
         std::unordered_map<std::string, int> colour;
         // DFS: returns the name that closes a cycle, or "" if clean.
-        std::function<void(const std::string&, const std::string&)> dfs =
-            [&](const std::string& name, const std::string& via)
+        std::function<void(const std::string&, const std::string&, Position)> dfs =
+            [&](const std::string& name, const std::string& via, Position via_pos)
         {
             auto it = struct_registry.find(name);
             if (it == struct_registry.end())
                 error("Struct field references unknown type '" + name +
-                      "' (via '" + via + "')", Position{});
+                      "' (via '" + via + "')", via_pos);
             int& c = colour[name];
             if (c == 2) return;            // already fully checked
             if (c == 1)                    // back edge → cycle
                 error("Struct '" + name +
                       "' is part of a value-cycle (through '" + via + "'). "
-                      "Use an indirect type to break the cycle.", Position{});
+                      "Use an indirect type to break the cycle.", via_pos);
             c = 1;   // grey — on stack
             for (auto& [field_name, field_ty] : it->second.fields) {
                 if (!field_ty || field_ty->kind != Type::Kind::Named) continue;
-                const std::string& dep = field_ty->type_name;
-                dfs(dep, name + "." + field_name);
+                Position fpos = it->second.field_positions.count(field_name)
+                    ? it->second.field_positions.at(field_name)
+                    : it->second.def_pos;
+                dfs(field_ty->type_name, name + "." + field_name, fpos);
             }
             c = 2;   // black — done
         };
-        for (auto& [name, _] : struct_registry)
+        for (auto& [name, def] : struct_registry)
             if (colour[name] == 0)
-                dfs(name, name);
+                dfs(name, name, def.def_pos);
     }
 
-    TypePtr validate_if(Stmt* stmt) {
+    TypePtr validate_if(Stmt* stmt, bool* then_always_ret = nullptr, bool* else_always_ret = nullptr) {
         TypePtr cond = validate_expr(stmt->kind.if_cond.get());
         expect_compat(Type::bool_(), cond, stmt->pos, "if condition must be bool");
-        validate_compound(stmt->kind.if_body, false);
-        if (stmt->kind.else_or_else_if) validate_stmt(stmt->kind.else_or_else_if.get());
+        bool then_ret = false;
+        validate_compound(stmt->kind.if_body, false, &then_ret);
+        if (then_always_ret) *then_always_ret = then_ret;
+        bool else_ret = false;
+        if (stmt->kind.else_or_else_if) {
+            validate_stmt(stmt->kind.else_or_else_if.get(), &else_ret);
+        }
+        if (else_always_ret) *else_always_ret = else_ret;
         return Type::void_();
     }
 
@@ -761,9 +884,8 @@ private:
         if (!stmt->kind.spawn_fn) return Type::void_();
         int saved = iteration_depth;
         iteration_depth = 0;
-        async_depth++;
+        AsyncGuard _ag(async_stack, AsyncCtx::Spawn);
         TypePtr inner_ty = validate_stmt(stmt->kind.spawn_fn.get());
-        async_depth--;
         iteration_depth = saved;
         return Type::task(inner_ty ? inner_ty : Type::void_());
     }
@@ -772,6 +894,15 @@ private:
     {
         TypePtr iter_ty = validate_expr(stmt->kind.for_iter.get());
         TypePtr elem_ty = Type::infer();
+        if (iter_ty) {
+            if (iter_ty->kind == Type::Kind::Tensor) {
+                elem_ty = iter_ty->elem_type();
+            } else if (iter_ty->is_collection()) {
+                elem_ty = iter_ty->elem_type();
+            } else if (iter_ty->is_numeric()) {
+                elem_ty = Type::i32();
+            }
+        }
         if (iter_ty) {
             switch (iter_ty->kind) {
                 case Type::Kind::I32:
@@ -828,15 +959,30 @@ private:
 
     void expect_compat(const TypePtr& expected, const TypePtr& actual, Position pos, const std::string& ctx) {
         if (!expected || !actual) return;
-        if (expected->is_infer()) return;
-        if (actual->is_infer()) return;
-        if (expected->kind == Type::Kind::Var) return;
-        if (actual->kind == Type::Kind::Var) return;
+        if (expected->is_infer() && actual->is_infer()) return; // both unknown → ok
+        if (expected->is_infer() || actual->is_infer()) {
+            if (!expected->is_infer()) {
+                error(ctx + " — RHS is infer but LHS expects concrete type " + expected->str(), pos);
+            }
+            if (!actual->is_infer()) {
+                error(ctx + " — LHS is infer but RHS is concrete " + actual->str(), pos);
+            }
+        }
+        if (expected->kind == Type::Kind::Var || actual->kind == Type::Kind::Var) return;
         if (!type_compat(expected, actual))
             error(ctx + " (expected " + expected->str() + ", got " + actual->str() + ")", pos);
         }
 
     using SubstMap = std::unordered_map<std::string, TypePtr>;
+    
+    static bool occurs_in(const std::string& var, const TypePtr& ty) {
+        if (!ty) return false;
+        if (ty->kind == Type::Kind::Var) return ty->type_name == var;
+        for (auto& a : ty->args)
+            if (occurs_in(var, a)) return true;
+        return false;
+    }
+
     void collect_subst(const TypePtr& param, const TypePtr& actual,
                        SubstMap& subst, Position pos)
     {
@@ -846,6 +992,10 @@ private:
             const std::string& tvar = param->type_name;
             auto it = subst.find(tvar);
             if (it == subst.end()) {
+                if (actual->kind != Type::Kind::Var && occurs_in(tvar, actual))
+                    error("Generic type parameter '" + tvar +
+                          "' would create an infinite type (" +
+                          tvar + " = " + actual->str() + ")", pos);
                 subst[tvar] = actual;   // first occurrence — bind it
             } else {
                 // Subsequent occurrence — must match the already-bound type

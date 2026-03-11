@@ -3,6 +3,7 @@
 #include <string>
 #include <memory>
 #include <stdexcept>
+#include <unordered_set>
 #include "../lexer/Lexer.h"
 #include "../ast/ASTNode.h"
 
@@ -24,6 +25,8 @@ private:
     Lexer& lexer;
     Token  current;
     Token  previous;
+
+    std::unordered_set<std::string> active_generic_names;
 
     void      advance();
     bool      check(TokenKind k) const;

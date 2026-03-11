@@ -6,6 +6,7 @@
 #include <optional>
 #include <variant>
 #include <cassert>
+#include <functional>
 #include "ASTNode.h"
 
 using Dim = std::variant<int, std::string>;
@@ -324,3 +325,75 @@ inline TypePtr Type::fromTyKind(
         default:              return infer();
     }
 }
+
+struct BuiltinEntry {
+    Type::Kind   receiver_kind;
+    std::string  member;
+    std::function<TypePtr(const TypePtr&)> make_type;
+};
+
+inline const std::vector<BuiltinEntry>& builtin_method_table() {
+    static const std::vector<BuiltinEntry> tbl = {
+        { Type::Kind::Tensor, "shape",         [](const TypePtr&)   { return Type::array(Type::i32()); } },
+        { Type::Kind::Tensor, "rank",          [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Tensor, "size",          [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Tensor, "dtype",         [](const TypePtr&)   { return Type::str_(); } },
+        { Type::Kind::Tensor, "requires_grad", [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Tensor, "T",             [](const TypePtr& r) { return r; } },
+        { Type::Kind::Tensor, "grad",          [](const TypePtr& r) { return Type::tensor(r->elem_type()); } },
+        { Type::Kind::Tensor, "item",          [](const TypePtr& r) { return r->elem_type(); } },
+        { Type::Kind::Tensor, "sum",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "mean",          [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "min",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "max",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "prod",          [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "flatten",       [](const TypePtr& r) { return Type::fn({}, r); } },
+        { Type::Kind::Tensor, "contiguous",    [](const TypePtr& r) { return Type::fn({}, r); } },
+        { Type::Kind::Tensor, "clone",         [](const TypePtr& r) { return Type::fn({}, r); } },
+        { Type::Kind::Tensor, "detach",        [](const TypePtr& r) { return Type::fn({}, r); } },
+
+        { Type::Kind::Array,  "len",           [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Array,  "is_empty",      [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Array,  "push",          [](const TypePtr& r) { return Type::fn({r->elem_type()}, Type::void_()); } },
+        { Type::Kind::Array,  "pop",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+
+        { Type::Kind::Map,    "len",           [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Map,    "is_empty",      [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Map,    "keys",          [](const TypePtr& r) { return Type::array(r->key_type()); } },
+        { Type::Kind::Map,    "values",        [](const TypePtr& r) { return Type::array(r->val_type()); } },
+        { Type::Kind::Map,    "contains",      [](const TypePtr& r) { return Type::fn({r->key_type()}, Type::bool_()); } },
+        { Type::Kind::Map,    "get",           [](const TypePtr& r) { return Type::fn({r->key_type()}, r->val_type()); } },
+        { Type::Kind::Map,    "insert",        [](const TypePtr& r) { return Type::fn({r->key_type(), r->val_type()}, Type::void_()); } },
+        { Type::Kind::Map,    "remove",        [](const TypePtr& r) { return Type::fn({r->key_type()}, Type::void_()); } },
+
+        { Type::Kind::Str,    "len",           [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Str,    "is_empty",      [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Str,    "to_upper",      [](const TypePtr&)   { return Type::fn({}, Type::str_()); } },
+        { Type::Kind::Str,    "to_lower",      [](const TypePtr&)   { return Type::fn({}, Type::str_()); } },
+        { Type::Kind::Str,    "trim",          [](const TypePtr&)   { return Type::fn({}, Type::str_()); } },
+        { Type::Kind::Str,    "contains",      [](const TypePtr&)   { return Type::fn({Type::str_()}, Type::bool_()); } },
+        { Type::Kind::Str,    "split",         [](const TypePtr&)   { return Type::array(Type::str_()); } },
+        { Type::Kind::Str,    "parse_i32",     [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Str,    "parse_f32",     [](const TypePtr&)   { return Type::f32(); } },
+
+        { Type::Kind::Task,   "is_done",       [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Task,   "cancel",        [](const TypePtr&)   { return Type::fn({}, Type::void_()); } },
+    };
+    return tbl;
+}
+
+inline TypePtr lookup_builtin(const TypePtr& receiver, const std::string& member) {
+    if (!receiver) return nullptr;
+    for (auto& e : builtin_method_table())
+        if (e.receiver_kind == receiver->kind && e.member == member)
+            return e.make_type(receiver);
+    return nullptr;
+}
+
+inline std::string builtin_members_for(Type::Kind k) {
+    std::string out;
+    for (auto& e : builtin_method_table())
+        if (e.receiver_kind == k) { if (!out.empty()) out += ", "; out += e.member; }
+    return out;
+}
+

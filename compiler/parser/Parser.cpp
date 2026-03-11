@@ -7,15 +7,9 @@ Parser::Parser(Lexer& lexer)
     , previous(current)
 {}
 
-StmtPtr Parser::makeStmt(StmtKind kind, Position pos)
-{
-    return std::make_unique<Stmt>(std::move(kind), pos);
-}
+StmtPtr Parser::makeStmt(StmtKind kind, Position pos) { return std::make_unique<Stmt>(std::move(kind), pos); }
 
-ExprPtr Parser::makeExpr(ExprKind kind, Position pos)
-{
-    return std::make_unique<Expr>(std::move(kind), pos);
-}
+ExprPtr Parser::makeExpr(ExprKind kind, Position pos) { return std::make_unique<Expr>(std::move(kind), pos); }
 
 void Parser::advance()
 {
@@ -23,10 +17,7 @@ void Parser::advance()
     current  = lexer.nextToken();
 }
 
-bool Parser::check(TokenKind k) const
-{
-    return current.kind == k;
-}
+bool Parser::check(TokenKind k) const { return current.kind == k; }
 
 bool Parser::match(TokenKind k)
 {
@@ -40,10 +31,7 @@ void Parser::expect(TokenKind k, const std::string& msg)
     advance();
 }
 
-void Parser::consumeOptionalSemicolon()
-{
-    match(TokenKind::SEMICOLON);
-}
+void Parser::consumeOptionalSemicolon() { match(TokenKind::SEMICOLON); }
 
 ParseError Parser::error(const std::string& msg) const
 {
@@ -180,16 +168,22 @@ StmtPtr Parser::parseFnDecl()
     std::vector<std::string> generic_names;
     if (check(TokenKind::HASH))
         generic_names = parseGenericNames();
+    active_generic_names.clear();
+    for (auto& gn : generic_names) active_generic_names.insert(gn);
     expect(TokenKind::LPAREN, "expected '(' after function name");
     std::vector<Ident> params = parseParamList();
     expect(TokenKind::RPAREN, "expected ')' after parameters");
     TyKind ret_ty = TyKind::Void;
+    std::string ret_utn;
     if (match(TokenKind::ARROW))
         ret_ty = parseType();
+        if (ret_ty == TyKind::Generic || ret_ty == TyKind::UserDef)
+            ret_utn = previous.value;
     // body
     Compound body = parseCompound();
+    active_generic_names.clear();
     // build the Func object — ident carries the return type in ty_kind
-    Ident fn_ident = Ident::unqual(IdentInfo{ fn_name, ret_ty, IdentCtx::FuncDef, name_pos });
+    Ident fn_ident = Ident::unqual(IdentInfo{ fn_name, ret_ty, IdentCtx::FuncDef, name_pos, ret_utn });
     Func  func(std::move(fn_ident), std::move(params), std::move(body));
     func.generic_names = std::move(generic_names);
     StmtKind k;
@@ -604,6 +598,7 @@ ExprPtr Parser::parsePostfix()
             expect(TokenKind::RBRACKET, "expected ']' after index");
             ExprKind k;
             k.tag   = ExprKind::Tag::Index;
+            k.target = std::move(expr);
             k.index = std::move(idx);
             expr    = makeExpr(std::move(k), p);
         }
@@ -994,9 +989,9 @@ TyKind Parser::parseType()
         case TokenKind::KW_FN:     advance(); return TyKind::FnType;
         case TokenKind::IDENTIFIER:
         {
-            const std::string& id = current.value;
+            std::string id = current.value;
             advance();
-            bool is_generic = (id.size() == 1 && std::isupper((unsigned char)id[0]));
+            bool is_generic = active_generic_names.count(id) > 0;
             return is_generic ? TyKind::Generic : TyKind::UserDef;
         }
         default:
@@ -1065,7 +1060,10 @@ std::vector<Ident> Parser::parseParamList()
         advance();
         expect(TokenKind::COLON, "expected ':' after parameter name");
         TyKind ty = parseType();
-        params.push_back(Ident::unqual(IdentInfo{ name, ty, IdentCtx::Param, p }));
+        std::string utn;
+        if (ty == TyKind::Generic || ty == TyKind::UserDef)
+            utn = previous.value;
+        params.push_back(Ident::unqual(IdentInfo{ name, ty, IdentCtx::Param, p, utn }));
         match(TokenKind::COMMA);
     }
     return params;
