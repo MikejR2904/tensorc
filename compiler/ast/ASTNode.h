@@ -41,6 +41,7 @@ enum class TyKind
     Infer,
     // named user type  e.g. MyStruct
     UserDef,
+    Task,
 };
 
 enum class IdentCtx
@@ -52,6 +53,13 @@ enum class IdentCtx
     FuncDef,    // function definition
 };
 
+struct GenericParams
+{
+    std::vector<TyKind> type_params;   // f32, i32 ...
+    std::vector<std::variant<int, std::string>> shape; // [3, 4] or [N, M]
+    Position pos;
+};
+
 struct IdentInfo
 {
     std::string name;
@@ -59,8 +67,10 @@ struct IdentInfo
     IdentCtx    ctx;
     Position    pos;
     std::optional<std::string> user_type_name;
-    IdentInfo(std::string n, TyKind t, IdentCtx c, Position p, std::optional<std::string> user_ty = std::nullopt)
-        : name(std::move(n)), ty_kind(t), ctx(c), pos(p), user_type_name(std::move(user_ty)) {}
+    bool requires_grad = false;
+    std::optional<GenericParams> tensor_gp;
+    IdentInfo(std::string n, TyKind t, IdentCtx c, Position p, std::optional<std::string> user_ty = std::nullopt, bool grad = false)
+        : name(std::move(n)), ty_kind(t), ctx(c), pos(p), user_type_name(std::move(user_ty)), requires_grad(grad) {}
 };
 
 struct Ident
@@ -86,6 +96,10 @@ struct Ident
         return empty;
     }
     void set_user_type_name(std::string name) { info.user_type_name = std::move(name); }
+    bool requires_grad() const { return info.requires_grad; }
+    void set_requires_grad(bool b) { info.requires_grad = b; }
+    const std::optional<GenericParams>& tensor_gp() const { return info.tensor_gp; }
+    void set_tensor_gp(GenericParams gp) { info.tensor_gp = std::move(gp); }
 };
 
 struct Compound
@@ -117,13 +131,6 @@ enum class UnaryOp
 {
     Neg,    // -x
     Not,    // !x
-};
-
-struct GenericParams
-{
-    std::vector<TyKind>  type_params;   // f32, i32 ...
-    std::vector<int>     shape;         // [3, 4]
-    Position             pos;
 };
 
 struct LitKind
@@ -220,6 +227,7 @@ struct ExprKind
 
     std::string struct_init_name;
     std::vector<std::pair<std::string, ExprPtr>> struct_init_fields;
+    bool is_async_fn;
 
     Expr* subject() const
     {

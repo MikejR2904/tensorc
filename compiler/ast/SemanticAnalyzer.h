@@ -171,8 +171,7 @@ private:
         }
         Symbol sym(stmt->kind.let_ident.name(), var_ty, IdentCtx::Def, stmt->pos);
         if (var_ty && var_ty->kind == Type::Kind::Tensor) {
-            const auto& utn = stmt->kind.let_ident.user_type_name();
-            sym.requires_grad = (utn.has_value() && *utn == "@grad");
+            sym.requires_grad = stmt->kind.let_ident.requires_grad();
         }
         symb_tab.define(sym);
         return var_ty;
@@ -184,8 +183,11 @@ private:
         for (auto& p : func.params) {
             p_tys.push_back(Type::fromTyKind(p.ty_kind(), p.user_type_name()));
         }
-        TypePtr ret = Type::fromTyKind(func.ident.ty_kind(), func.ident.user_type_name());
-        TypePtr effective_ret = func.is_async ? Type::task(ret) : ret;
+        TypePtr ret = ident_to_type(func.ident);
+        TypePtr effective_ret = ret;
+        if (func.is_async && (!ret || ret->kind != Type::Kind::Task)) {
+            effective_ret = Type::task(ret);
+        }
         TypePtr fn_ty = Type::fn(p_tys, effective_ret);
         if (!existing) {
             symb_tab.define(Symbol(func.ident.name(), fn_ty, IdentCtx::FuncDef, func.ident.pos()));
@@ -197,8 +199,27 @@ private:
         std::unique_ptr<AsyncGuard> async_guard;
         if (func.is_async) async_guard = std::make_unique<AsyncGuard>(async_stack, AsyncCtx::AsyncFn);
         // Register parameters in function scope
+        std::unordered_set<std::string> dim_names_seen;
+        auto register_dim = [&](const std::string& name) {
+            if (dim_names_seen.insert(name).second) {
+                Symbol dim_sym(name, Type::i64(), IdentCtx::Param, func.ident.pos());
+                dim_sym.is_mutable = false;
+                symb_tab.define(dim_sym);
+            }
+        };
+        for (auto& gname : func.generic_names) {
+            register_dim(gname);
+        }
         for (auto& param : func.params) {
-            TypePtr pt = Type::fromTyKind(param.ty_kind(), param.user_type_name());
+            if (param.tensor_gp().has_value()) {
+                for (auto& d : param.tensor_gp()->shape) {
+                    if (std::holds_alternative<std::string>(d))
+                        register_dim(std::get<std::string>(d));
+                }
+            }
+        }
+        for (auto& param : func.params) {
+            TypePtr pt = ident_to_type(param);
             Symbol psym(param.name(), pt, IdentCtx::Param, param.pos());
             psym.is_mutable    = false;
             psym.requires_grad = (pt && pt->kind == Type::Kind::Tensor);
@@ -208,14 +229,12 @@ private:
         TypePtr body_ty = validate_compound(func.body, true, &always_returns);
         // Ensure return type matches
         if (!ret->is_void()) {
-            bool has_implicit_return = !body_ty->is_void();
-            if (!has_implicit_return && !always_returns)
-                error("Function '" + func.ident.name() + "' is declared -> " +
-                      ret->str() + " but may reach end without returning a value",
-                      func.ident.pos());
-            if (!body_ty->is_void())
-                expect_compat(ret, body_ty, func.ident.pos(),
-                              "Function '" + func.ident.name() + "' return type mismatch");
+            if (!body_ty->is_void()) {
+                expect_compat(ret, body_ty, func.ident.pos(), "Async function '" + func.ident.name() + "' must return " + ret->str());
+            }
+            else if (!always_returns) {
+                error("Function '" + func.ident.name() + "' missing return statement", func.ident.pos());
+            }
         }
         expected_ret_ty = old_expect;
         symb_tab.popScope();
@@ -227,12 +246,20 @@ private:
             error("'await' used outside of an async context. "
                 "Mark the enclosing function 'async fn' or wrap in 'spawn'.", pos);
         }
-        TypePtr inner = validate_expr(expr);
-        if (inner->kind != Type::Kind::Task) {
-            error("Cannot await non-task type (got " + inner->str() + ")", pos);
+        Expr* sub = expr->kind.awaited.get(); 
+        if (!sub) sub = expr->kind.operand.get();
+        TypePtr current_ty = validate_expr(sub);
+        if (current_ty->kind != Type::Kind::Task) {
+            error("Cannot await non-task type (got " + current_ty->str() + ")", pos);
             return Type::infer();
         }
-        return inner->elem_type(); 
+        return current_ty->inner_type();
+        // TypePtr inner = validate_expr(expr->kind.awaited.get());
+        // if (inner->kind != Type::Kind::Task) {
+        //     error("Cannot await non-task type (got " + inner->str() + ")", pos);
+        //     return Type::infer();
+        // }
+        // return inner->elem_type(); 
     }
 
     // --- Expression Validation ---
@@ -313,7 +340,7 @@ private:
                     if (!gp.type_params.empty())
                         elem = Type::fromTyKind(gp.type_params[0]);
                     shape.reserve(gp.shape.size());
-                    for (int d : gp.shape) shape.emplace_back(d);
+                    for (const auto& d : gp.shape) shape.emplace_back(d);
                     for (auto& row : expr->kind.rows)
                         for (auto& e : row) validate_expr(e.get());
                     for (auto& e : expr->kind.elements)
@@ -485,8 +512,11 @@ private:
             }
             case ExprKind::Tag::Spawn: {
                 Expr* sub_expr = expr->kind.spawned_expr.get();
+                int saved = iteration_depth;
+                iteration_depth = 0;
                 AsyncGuard _ag(async_stack, AsyncCtx::Spawn);
                 TypePtr inner_ty = validate_expr(sub_expr);
+                iteration_depth = saved;
                 return Type::task(inner_ty ? inner_ty : Type::void_());
             }
             case ExprKind::Tag::Range: { // lo..hi
@@ -500,7 +530,7 @@ private:
                 validate_expr(expr->kind.send_val.get());
                 return Type::void_();
             }
-            case ExprKind::Tag::Await: { return validate_await(expr->kind.awaited.get(), expr->pos); }
+            case ExprKind::Tag::Await: { return validate_await(expr, expr->pos); }
             case ExprKind::Tag::FnExpr: { // fn(x:T)->T { }
                 symb_tab.pushScope();
                 TypePtr saved_ret = expected_ret_ty;
@@ -512,13 +542,21 @@ private:
                     p_tys.push_back(pt);
                     symb_tab.define(Symbol(param.first, pt, IdentCtx::Param, expr->pos));
                 }
+                std::optional<AsyncGuard> ag;
+                if (expr->kind.is_async_fn) {
+                    ag.emplace(async_stack, AsyncCtx::AsyncFn);
+                }
                 bool always_returns = false;
                 TypePtr body_ty = validate_compound(expr->kind.fn_body, true, &always_returns);
                 if (!ret_ann->is_void())
                     expect_compat(ret_ann, body_ty, expr->pos, "Lambda return type mismatch");
                 expected_ret_ty = saved_ret;
                 symb_tab.popScope();
-                return Type::fn(std::move(p_tys), ret_ann);
+                TypePtr final_ret_ty = ret_ann;
+                if (expr->kind.is_async_fn) {
+                    final_ret_ty = Type::task(ret_ann);
+                }
+                return Type::fn(std::move(p_tys), final_ret_ty);
             }
             case ExprKind::Tag::Match: { // similar to validate_match function
                 TypePtr subject_ty = validate_expr(expr->kind.match_subject.get());
@@ -1034,6 +1072,25 @@ private:
         return result;
     }
 
+    TypePtr ident_to_type(const Ident& id) const
+    {
+        if (id.ty_kind() == TyKind::Tensor && id.tensor_gp().has_value()) {
+            auto& gp = *id.tensor_gp();
+            TypePtr elem = gp.type_params.empty()
+                         ? Type::infer()
+                         : Type::fromTyKind(gp.type_params[0]);
+            std::vector<Dim> shape;
+            for (auto& d : gp.shape) {
+                if (std::holds_alternative<int>(d))
+                    shape.emplace_back(std::get<int>(d));
+                else
+                    shape.emplace_back(std::get<std::string>(d));
+            }
+            return Type::tensor(elem, std::move(shape));
+        }
+        return Type::fromTyKind(id.ty_kind(), id.user_type_name());
+    }
+
     static TyKind tkFromType(const TypePtr& t) {
         if (!t) return TyKind::Infer;
         switch (t->kind) {
@@ -1052,6 +1109,7 @@ private:
             case Type::Kind::Stack:  return TyKind::Stack;
             case Type::Kind::Tuple:  return TyKind::Tuple;
             case Type::Kind::Fn:     return TyKind::FnType;
+            case Type::Kind::Task:   return TyKind::Task;
             case Type::Kind::Named:  return TyKind::UserDef;
             case Type::Kind::Var:    return TyKind::Generic;
             case Type::Kind::Infer:  return TyKind::Infer;

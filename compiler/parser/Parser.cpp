@@ -137,6 +137,10 @@ StmtPtr Parser::parseLet()
 {
     Position p = current.pos;
     expect(TokenKind::KW_LET, "expected 'let'");
+    bool is_grad = false;
+    if (match(TokenKind::KW_GRAD)) {
+        is_grad = true;
+    }
     if (!check(TokenKind::IDENTIFIER))
         throw error("expected identifier after 'let'");
     std::string name = current.value;
@@ -144,13 +148,17 @@ StmtPtr Parser::parseLet()
     // optional type annotation  : T
     TyKind ty = TyKind::Infer;
     std::string user_type_name;
-    if (match(TokenKind::COLON))
+    if (match(TokenKind::COLON)) {
         ty = parseType();
-        if (ty == TyKind::UserDef) user_type_name = previous.value;
+        if (ty == TyKind::UserDef)
+            user_type_name = previous.value;
+    }
     expect(TokenKind::ASSIGN, "expected '=' in let statement");
     StmtKind k;
     k.tag       = StmtKind::Tag::Let;
-    k.let_ident = Ident::unqual(IdentInfo{ name, ty, IdentCtx::Def, p });
+    k.let_ident = Ident::unqual(IdentInfo{ name, ty, IdentCtx::Def, p, user_type_name, is_grad });
+    if (ty == TyKind::Tensor && last_tensor_gp.has_value())
+        k.let_ident.set_tensor_gp(std::move(*last_tensor_gp));
     k.let_expr  = parseExpr();
     consumeOptionalSemicolon();
     return makeStmt(std::move(k), p);
@@ -180,15 +188,20 @@ StmtPtr Parser::parseFnDecl()
     expect(TokenKind::RPAREN, "expected ')' after parameters");
     TyKind ret_ty = TyKind::Void;
     std::string ret_utn;
+    std::optional<GenericParams> ret_tensor_gp;
     if (match(TokenKind::ARROW))
         ret_ty = parseType();
         if (ret_ty == TyKind::Generic || ret_ty == TyKind::UserDef)
             ret_utn = previous.value;
+        if (ret_ty == TyKind::Tensor && last_tensor_gp.has_value())
+            ret_tensor_gp = std::move(last_tensor_gp);
     // body
     Compound body = parseCompound();
     active_generic_names.clear();
     // build the Func object — ident carries the return type in ty_kind
     Ident fn_ident = Ident::unqual(IdentInfo{ fn_name, ret_ty, IdentCtx::FuncDef, name_pos, ret_utn });
+    if (ret_tensor_gp.has_value())
+        fn_ident.set_tensor_gp(std::move(*ret_tensor_gp));
     Func  func(std::move(fn_ident), std::move(params), std::move(body));
     func.generic_names = std::move(generic_names);
     func.is_async = is_async;
@@ -314,6 +327,7 @@ StmtPtr Parser::parseImport()
     {
         throw error("expected string path or identifier after 'import'");
     }
+
     if (match(TokenKind::KW_AS))
     {
         if (!check(TokenKind::IDENTIFIER))
@@ -570,6 +584,25 @@ ExprPtr Parser::parseMatMul()
 
 ExprPtr Parser::parseUnary()
 {
+    if (check(TokenKind::KW_AWAIT)) // Handle 'await'
+    {
+        Position p = current.pos;
+        advance();
+        ExprKind k;
+        k.tag = ExprKind::Tag::Await;
+        k.operand = parseUnary();
+        return makeExpr(std::move(k), p);
+    }
+
+    if (match(TokenKind::KW_SPAWN)) {
+        Position p = previous.pos;
+        ExprPtr operand = parsePostfix(); 
+        ExprKind k;
+        k.tag = ExprKind::Tag::Spawn;
+        k.spawned_expr = std::move(operand);
+        return makeExpr(std::move(k), p);
+    }
+
     if (check(TokenKind::NOT) || check(TokenKind::MINUS))
     {
         Position p  = current.pos;
@@ -690,6 +723,7 @@ ExprPtr Parser::parsePrimary()
         case TokenKind::KW_SPAWN:   return parseSpawnExpr();
         case TokenKind::KW_AWAIT:   return parseAwait();
         case TokenKind::KW_GRAD:    return parseGrad();
+        case TokenKind::KW_ASYNC:   return parseFnExpr();
         default:
             throw error("unexpected token in expression");
     }
@@ -859,9 +893,11 @@ ExprPtr Parser::parseBlockExpr()
 ExprPtr Parser::parseFnExpr()
 {
     Position p = current.pos;
+    bool is_async = match(TokenKind::KW_ASYNC);
     expect(TokenKind::KW_FN, "expected 'fn'");
     ExprKind k;
     k.tag = ExprKind::Tag::FnExpr;
+    k.is_async_fn = is_async;
     if (check(TokenKind::HASH))
         k.fn_generic_names = parseGenericNames();
     expect(TokenKind::LPAREN, "expected '('");
@@ -872,7 +908,6 @@ ExprPtr Parser::parseFnExpr()
     if (match(TokenKind::ARROW))
         k.fn_ret_type = parseType();
     k.fn_body = parseCompound();
-
     return makeExpr(std::move(k), p);
 }
 
@@ -1035,35 +1070,104 @@ std::vector<std::vector<ExprPtr>> Parser::parseTensorRows()
     return rows;
 }
 
+void Parser::parseShapeAnnotation() {
+    expect(TokenKind::LBRACKET, "expected '['");
+    while (!check(TokenKind::RBRACKET)) {
+        // Consume N, 512, etc.
+        advance(); 
+        if (!match(TokenKind::COMMA)) break;
+    }
+    expect(TokenKind::RBRACKET, "expected ']'");
+}
 
 TyKind Parser::parseType()
 {
+    TyKind base_ty = TyKind::Void;
     switch (current.kind)
     {
-        case TokenKind::KW_I32:    advance(); return TyKind::I32;
-        case TokenKind::KW_I64:    advance(); return TyKind::I64;
-        case TokenKind::KW_F32:    advance(); return TyKind::F32;
-        case TokenKind::KW_F64:    advance(); return TyKind::F64;
-        case TokenKind::KW_BOOL:   advance(); return TyKind::Bool;
-        case TokenKind::KW_STR:    advance(); return TyKind::Str;
-        case TokenKind::KW_VOID:   advance(); return TyKind::Void;
-        case TokenKind::KW_TENSOR: advance(); return TyKind::Tensor;
-        case TokenKind::KW_MAP:    advance(); return TyKind::Map;
-        case TokenKind::KW_SET:    advance(); return TyKind::Set;
-        case TokenKind::KW_QUEUE:  advance(); return TyKind::Queue;
-        case TokenKind::KW_STACK:  advance(); return TyKind::Stack;
-        case TokenKind::KW_TUPLE:  advance(); return TyKind::Tuple;
-        case TokenKind::KW_FN:     advance(); return TyKind::FnType;
+        case TokenKind::KW_I32:    advance(); base_ty = TyKind::I32; break;
+        case TokenKind::KW_I64:    advance(); base_ty = TyKind::I64; break;
+        case TokenKind::KW_F32:    advance(); base_ty = TyKind::F32; break;
+        case TokenKind::KW_F64:    advance(); base_ty = TyKind::F64; break;
+        case TokenKind::KW_BOOL:   advance(); base_ty = TyKind::Bool; break;
+        case TokenKind::KW_STR:    advance(); base_ty = TyKind::Str; break;
+        case TokenKind::KW_VOID:   advance(); base_ty = TyKind::Void; break;
+        case TokenKind::KW_TASK: {
+            advance();
+            if (match(TokenKind::HASH)) {
+                expect(TokenKind::LPAREN, "Expected '(' after Task#");
+                parseType(); 
+                expect(TokenKind::RPAREN, "Expected ')' to close Task#");
+            }
+            return TyKind::Task;
+        }
+        case TokenKind::KW_TENSOR: {
+            advance();
+            last_tensor_gp = std::nullopt;
+            if (check(TokenKind::LT)) {
+                advance();   // consume '<'
+                GenericParams gp;
+                gp.pos = current.pos;
+                // Optional element type keyword  (e.g. f32, i32)
+                if (!check(TokenKind::LBRACKET)) {
+                    gp.type_params.push_back(parseType());
+                    match(TokenKind::COMMA);
+                }
+                // Optional shape  [N, M]  /  [3, 4]  /  mixed
+                if (check(TokenKind::LBRACKET)) {
+                    advance();  // consume '['
+                    while (!check(TokenKind::RBRACKET) && !check(TokenKind::EOF_TOKEN)) {
+                        if (check(TokenKind::INT)) {
+                            gp.shape.emplace_back(std::stoi(current.value));
+                            advance();
+                        } else if (check(TokenKind::IDENTIFIER)) {
+                            gp.shape.emplace_back(current.value);
+                            advance();
+                        } else {
+                            throw error("expected integer or identifier in tensor shape");
+                        }
+                        match(TokenKind::COMMA);
+                    }
+                    expect(TokenKind::RBRACKET, "expected ']' after tensor shape");
+                }
+                expect(TokenKind::GT, "expected '>' after Tensor type annotation");
+                last_tensor_gp = std::move(gp);
+
+            } else if (check(TokenKind::HASH)) {
+                // Tensor#(f32, [B, D])  — reuse parseGenericParams which handles
+                // the  #(type_params..., [shape...])  grammar exactly.
+                last_tensor_gp = parseGenericParams();
+            }
+            base_ty = TyKind::Tensor; 
+            break;
+        
+        }
+        case TokenKind::KW_MAP:    advance(); base_ty = TyKind::Map; break;
+        case TokenKind::KW_SET:    advance(); base_ty = TyKind::Set; break;
+        case TokenKind::KW_QUEUE:  advance(); base_ty = TyKind::Queue; break;
+        case TokenKind::KW_STACK:  advance(); base_ty = TyKind::Stack; break;
+        case TokenKind::KW_TUPLE:  advance(); base_ty = TyKind::Tuple; break;
+        case TokenKind::KW_FN:     advance(); base_ty = TyKind::FnType; break;
         case TokenKind::IDENTIFIER:
         {
             std::string id = current.value;
             advance();
-            bool is_generic = active_generic_names.count(id) > 0;
-            return is_generic ? TyKind::Generic : TyKind::UserDef;
+            base_ty = active_generic_names.count(id) > 0 ? TyKind::Generic : TyKind::UserDef;
+            break;
         }
         default:
             throw error("expected type annotation");
     }
+    if (match(TokenKind::LT)) {
+        while (!check(TokenKind::GT) && !check(TokenKind::EOF_TOKEN)) {
+            if (check(TokenKind::LBRACKET)) {
+                parseShapeAnnotation();
+            } else parseType();
+            if (!match(TokenKind::COMMA)) break;
+        }
+        expect(TokenKind::GT, "expected '>' after generic arguments");
+    }
+    return base_ty;
 }
 
 GenericParams Parser::parseGenericParams()
@@ -1082,6 +1186,11 @@ GenericParams Parser::parseGenericParams()
                 if (check(TokenKind::INT))
                 {
                     gp.shape.push_back(std::stoi(current.value));
+                    advance();
+                } else if (check(TokenKind::IDENTIFIER))
+                {
+                    // Symbolic dimension: [N, hidden, batch]
+                    gp.shape.emplace_back(current.value);
                     advance();
                 }
                 match(TokenKind::COMMA);
@@ -1130,7 +1239,11 @@ std::vector<Ident> Parser::parseParamList()
         std::string utn;
         if (ty == TyKind::Generic || ty == TyKind::UserDef)
             utn = previous.value;
-        params.push_back(Ident::unqual(IdentInfo{ name, ty, IdentCtx::Param, p, utn }));
+        Ident param_ident = Ident::unqual(IdentInfo{ name, ty, IdentCtx::Param, p, utn });
+        // If the param was  x: Tensor<f32,[B,D]>, capture the shape annotation.
+        if (ty == TyKind::Tensor && last_tensor_gp.has_value())
+            param_ident.set_tensor_gp(std::move(*last_tensor_gp));
+        params.push_back(std::move(param_ident));
         match(TokenKind::COMMA);
     }
     return params;

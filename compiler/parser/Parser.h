@@ -27,6 +27,7 @@ private:
     Token  previous;
 
     std::unordered_set<std::string> active_generic_names;
+    std::optional<GenericParams> last_tensor_gp;
 
     void      advance();
     bool      check(TokenKind k) const;
@@ -63,6 +64,7 @@ private:
     ExprPtr parseUnary();           // !  -
     ExprPtr parsePostfix();         // call  index  field  scope  <-
     ExprPtr parsePrimary();         // literals  identifiers  keywords
+    void parseShapeAnnotation();
     ExprPtr parseIntLit();
     ExprPtr parseFloatLit();
     ExprPtr parseBoolLit();

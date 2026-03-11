@@ -44,6 +44,7 @@ static const std::unordered_map<std::string, TokenKind> KEYWORDS = {
     { "as",       TokenKind::KW_AS       },
     { "in",       TokenKind::KW_IN       },
     { "struct",   TokenKind::KW_STRUCT   },
+    { "Task",     TokenKind::KW_TASK     },
     // boolean literals
     { "true",     TokenKind::KW_TRUE     },
     { "false",    TokenKind::KW_FALSE    },

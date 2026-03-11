@@ -55,6 +55,7 @@ enum class TokenKind
     KW_AS,
     KW_IN,
     KW_STRUCT,
+    KW_TASK,
 
     // arithmetic operators
     PLUS,             // +
