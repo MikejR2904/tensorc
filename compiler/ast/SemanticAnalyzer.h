@@ -754,33 +754,22 @@ private:
         Expr* rhs = expr->kind.pipe_rhs.get();
         if (!rhs) return Type::infer();
         if (rhs->kind.tag != ExprKind::Tag::Call) error("RHS of pipe operator must be a function call", expr->pos);
-        Expr* rhs_callee = rhs->kind.callee.get();
-        if (!rhs_callee || rhs_callee->kind.tag != ExprKind::Tag::Id) return Type::infer();
-        const std::string& fn_name = rhs_callee->kind.id.name();
-        Symbol* sym = symb_tab.lookup(fn_name);
-        if (!sym) error("Pipe: undefined function '" + fn_name + "'", rhs->pos);
-        if (!sym->type || sym->type->kind != Type::Kind::Fn)
-            return Type::infer();
-        auto params = sym->type->param_types();
+        TypePtr callee_ty = validate_expr(rhs->kind.callee.get());
+        if (callee_ty->kind != Type::Kind::Fn)
+            error("Pipe RHS must be a function", rhs->pos);
+        auto params = callee_ty->param_types();
         if (params.empty())
-            error("Pipe: '" + fn_name + "' takes no arguments", rhs->pos);
-        expect_compat(params[0], lhs_ty, expr->pos,
-                      "Pipe: " + lhs_ty->str() +
-                      " cannot flow into first parameter of '" + fn_name +
-                      "' (" + params[0]->str() + ")");
+            error("Cannot pipe into zero-argument function", rhs->pos);
+        SubstMap subst;
+        collect_subst(params[0], lhs_ty, subst, expr->pos);
         auto& provided = rhs->kind.args;
         if (provided.size() != params.size() - 1)
-            error("Pipe: '" + fn_name + "' expects " +
-                  std::to_string(params.size() - 1) +
-                  " additional argument(s), got " +
-                  std::to_string(provided.size()), rhs->pos);
+            error("Pipe expects " + std::to_string(params.size()-1) + " extra args, got " + std::to_string(provided.size()), rhs->pos);
         for (size_t i = 0; i < provided.size(); ++i) {
             TypePtr actual = validate_expr(provided[i].get());
-            expect_compat(params[i + 1], actual, provided[i]->pos,
-                          "Pipe: argument " + std::to_string(i + 2) +
-                          " of '" + fn_name + "' type mismatch");
+            collect_subst(params[i+1], actual, subst, provided[i]->pos);
         }
-        return sym->type->ret_type();
+        return apply_subst(callee_ty->ret_type(), subst);
     }
 
     TypePtr validate_match(Stmt* stmt) {
@@ -917,7 +906,7 @@ private:
                     elem_ty = iter_ty->elem_type();
                     break;
                 case Type::Kind::Tensor:
-                    elem_ty = Type::f32();  // scalar iteration over tensor
+                    elem_ty = iter_ty->elem_type();  // scalar iteration over tensor
                     break;
                 default:
                     elem_ty = Type::infer();
@@ -960,13 +949,11 @@ private:
     void expect_compat(const TypePtr& expected, const TypePtr& actual, Position pos, const std::string& ctx) {
         if (!expected || !actual) return;
         if (expected->is_infer() && actual->is_infer()) return; // both unknown → ok
-        if (expected->is_infer() || actual->is_infer()) {
-            if (!expected->is_infer()) {
-                error(ctx + " — RHS is infer but LHS expects concrete type " + expected->str(), pos);
-            }
-            if (!actual->is_infer()) {
-                error(ctx + " — LHS is infer but RHS is concrete " + actual->str(), pos);
-            }
+        if (!expected->is_infer()) {
+            error(ctx + " — RHS is infer but LHS expects concrete type " + expected->str(), pos);
+        }
+        if (!actual->is_infer()) {
+            error(ctx + " — LHS is infer but RHS is concrete " + actual->str(), pos);
         }
         if (expected->kind == Type::Kind::Var || actual->kind == Type::Kind::Var) return;
         if (!type_compat(expected, actual))
