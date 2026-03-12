@@ -3,7 +3,7 @@
 #include "ASTNode.h"
 #include "Type.h"
 #include "SymbolTable.h"
-#include "../io/ImportRegistry.h"
+#include "../io/builtins.h"
 #include <stdexcept>
 #include <string>
 #include <iostream>
@@ -20,7 +20,7 @@ struct StructDef {
 
 class SemanticAnalyzer {
 public:
-    explicit SemanticAnalyzer(ImportRegistry imports = ImportRegistry::with_builtins()) 
+    explicit SemanticAnalyzer(io::BuiltinRegistry imports = io::BuiltinRegistry::with_builtins()) 
         : symb_tab(), import_reg(std::move(imports)) {}
 
     void validate(Program& program) {
@@ -39,7 +39,7 @@ public:
 
 private:
     SymbolTable symb_tab;
-    ImportRegistry import_reg;
+    io::BuiltinRegistry import_reg;
     std::unordered_map<std::string, std::string> active_imports;
     std::unordered_map<std::string, StructDef> struct_registry;
     TypePtr expected_ret_ty = Type::void_();
@@ -185,7 +185,7 @@ private:
         }
         TypePtr ret = ident_to_type(func.ident);
         TypePtr effective_ret = ret;
-        if (func.is_async && (!ret || ret->kind != Type::Kind::Task)) {
+        if (func.is_async && ret->kind != Type::Kind::Task) {
             effective_ret = Type::task(ret);
         }
         TypePtr fn_ty = Type::fn(p_tys, effective_ret);
