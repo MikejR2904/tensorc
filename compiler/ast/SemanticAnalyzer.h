@@ -27,6 +27,7 @@ public:
         try {
             for (auto& stmt : program.stmts)
                 register_top_level(stmt.get());
+            harvest_program_symbols(program);
             validate_structs();
             for (auto& stmt : program.stmts) {
                 validate_stmt(stmt.get());
@@ -83,6 +84,32 @@ private:
                     Type::fn(std::move(p_tys), std::move(ret)),
                     IdentCtx::FuncDef,
                     func.ident.pos()));
+        }
+    }
+
+    void harvest_program_symbols(Program& program) {
+        for (auto& stmt : program.stmts) {
+            if (stmt->kind.tag == StmtKind::Tag::Let) {
+                register_let_symbol(stmt.get());
+            } else if (stmt->kind.tag == StmtKind::Tag::Func && stmt->kind.func.has_value()) {
+                auto& func = stmt->kind.func.value();
+                // Peek into function bodies (like main) to find dimension variables
+                for (auto& body_stmt : func.body.stmts) {
+                    if (body_stmt && body_stmt->kind.tag == StmtKind::Tag::Let) {
+                        register_let_symbol(body_stmt.get());
+                    }
+                }
+            }
+        }
+    }
+
+    void register_let_symbol(Stmt* stmt) {
+        const std::string& name = stmt->kind.let_ident.name();
+        // Only register if it's not already there to avoid shadowing issues
+        if (!symb_tab.lookup(name)) {
+            TypePtr var_ty = Type::fromTyKind(stmt->kind.let_ident.ty_kind());
+            // If it's a dimension-like variable, it's likely i64 or Infer
+            symb_tab.define(Symbol(name, var_ty, IdentCtx::Def, stmt->pos));
         }
     }
 

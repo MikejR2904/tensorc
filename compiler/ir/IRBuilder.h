@@ -25,9 +25,108 @@ public:
     void build(const Program& prog, IRModule* mod)
     {
         this->mod_ = mod;
-        for (auto& s : prog.stmts) {
-            if (s) lower_top_level(*s);
+        // for (auto& s : prog.stmts) {
+        //     if (s) lower_top_level(*s);
+        // }
+        for (auto& stmt : prog.stmts) {
+            if (stmt->kind.tag == StmtKind::Tag::Let) {
+                lower_top_level(*stmt);
+            } 
+            
+            if (stmt->kind.tag == StmtKind::Tag::Func && stmt->kind.func.has_value()) {
+                auto& func = stmt->kind.func.value();
+                // Peek inside the function body for Let statements to hoist
+                for (auto& param : func.params) {
+                    if (param.info.ty_kind == TyKind::Tensor && param.info.tensor_gp.has_value()) {
+                        for (auto& dim : param.info.tensor_gp->shape) {
+                            // If 'N' is unknown, define it as a symbolic IR constant
+                            if (const std::string* dim_name = std::get_if<std::string>(&dim)) {
+                                if (!lookup(*dim_name)) {
+                                    // Inject into IR symbol table as a symbolic constant
+                                    auto i32_ty = std::make_shared<Type>(Type::Kind::I32);
+                                    auto sym_val = std::make_unique<ir::ConstantInt>(0, std::move(i32_ty)); 
+                                    sym_val->name = "@" + *dim_name; // Name it so the IR knows it's 'N'
+                                    ir::Value* val_ptr = sym_val.get();
+                                    mod_->add_global(std::move(sym_val));
+                                    define(*dim_name, val_ptr);
+                                }
+                            }
+                        }
+                    }
+                }
+                // 1b. Harvest nested 'let' from body (e.g. inside main)
+                for (auto& body_stmt : func.body.stmts) {
+                    if (body_stmt->kind.tag == StmtKind::Tag::Let) {
+                        lower_top_level(*body_stmt);
+                    }
+                }
+            }
         }
+        for (auto& stmt : prog.stmts) {
+            if (stmt->kind.tag == StmtKind::Tag::Func) {
+                register_prototype(*stmt);
+            }
+        }
+
+        // --- PASS 3: Definition ---
+        for (auto& stmt : prog.stmts) {
+            if (stmt->kind.tag == StmtKind::Tag::Func) {
+                lower_func_body(*stmt);
+            }
+        }
+    }
+
+    TypePtr lower_type(const Ident& id) {
+        return Type::fromTyKind(id.info.ty_kind);
+    }
+
+    void register_prototype(const Stmt& s) {
+        auto& func = s.kind.func.value();
+        std::string fn_name = func.ident.name();
+        TypePtr ret_ty = lower_type(func.ident);
+        mod_->add_function(fn_name, ret_ty, false);
+
+        ir::Function* func_ptr = mod_->add_function(fn_name, ret_ty, false);
+        global_functions[fn_name] = func_ptr;
+        if (!func_ptr) return;
+
+        // Register the function in the IR Module
+        if (func_ptr->params.empty()) {
+            for (size_t i = 0; i < func.params.size(); ++i) {
+                auto& p = func.params[i];
+                auto arg = std::make_shared<ir::Argument>(p.name(), lower_type(p), i);
+                func_ptr->params.push_back(std::move(arg));
+            }
+        }
+        define(fn_name, func_ptr);
+    }
+
+    // --- lower_func_body: Implementation ---
+    void lower_func_body(const Stmt& s) {
+        auto& func = s.kind.func.value();
+        ir::Function* ir_func = global_functions[func.ident.name()];
+        if (!ir_func || func.body.stmts.empty()) return;
+        this->fn_ = ir_func;
+        this->bb_ = ir_func->add_block("entry");
+        this->scopes_.push_back({}); 
+        define(func.ident.name(), ir_func);
+
+        // Define parameters in the new scope
+        for (size_t i = 0; i < func.params.size(); ++i) {
+            if (i < ir_func->params.size()) {
+                define(func.params[i].name(), ir_func->params[i].get());
+            }
+        }
+
+        // Lower actual code
+        for (auto& body_stmt : func.body.stmts) {
+            lower_stmt(*body_stmt); 
+        }
+
+        // Cleanup
+        this->scopes_.pop_back();
+        this->fn_ = nullptr;
+        this->bb_ = nullptr;
     }
  
     // ── Cursor ────────────────────────────────────────────────────────────────
@@ -213,7 +312,9 @@ private:
         auto cv = make_const_from_expr(*s.kind.let_expr);
         if (!cv) return;
         cv->name = "@" + s.kind.let_ident.name();
+        ir::Value* global_ptr = cv.get();
         mod_->add_global(std::move(cv));
+        define(s.kind.let_ident.name(), global_ptr);
     }
  
     void lower_compound(const Compound& c) {
