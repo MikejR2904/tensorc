@@ -369,7 +369,13 @@ struct ExprKind
     }
 };
 
-struct Expr
+struct ASTNode {
+    virtual ~ASTNode() = default; 
+    TypePtr resolved_type = nullptr;
+    Position pos;
+};
+
+struct Expr : public ASTNode
 {
     ExprKind kind;
     Position pos;
@@ -474,7 +480,7 @@ struct StmtKind
     }
 };
 
-struct Stmt
+struct Stmt : public ASTNode
 {
     StmtKind kind;
     Position pos;

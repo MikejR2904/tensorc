@@ -436,7 +436,7 @@ private:
             case Type::Kind::Fn:
             {
                 std::string s = "fn(";
-                auto& params = t->param_types();
+                const auto& params = t->param_types();
                 for (size_t i = 0; i < params.size(); ++i)
                 {
                     s += type_str(params[i]);

@@ -4,6 +4,7 @@
  
 #include "IRModule.h"
 #include "IRPrinter.h"
+#include "../ast/ASTNode.h"
  
 #include <memory>
 #include <stdexcept>
@@ -11,98 +12,31 @@
 #include <unordered_map>
 #include <vector>
  
-// ═══════════════════════════════════════════════════════════════
-// AST stub types  (replace with #include "ast/AST.h" later)
-// ALL structs defined HERE, before IRBuilder, so dynamic_cast works.
-// ═══════════════════════════════════════════════════════════════
- 
-struct ASTNode { TypePtr resolved_type; virtual ~ASTNode() = default; };
- 
-struct LitIntExpr   : ASTNode { int64_t     value = 0; };
-struct LitFloatExpr : ASTNode { double      value = 0.0; };
-struct LitBoolExpr  : ASTNode { bool        value = false; };
-struct LitStrExpr   : ASTNode { std::string value; };
-struct IdentExpr    : ASTNode { std::string name; };
- 
-struct BinExpr : ASTNode {
-    std::string op;
-    std::unique_ptr<ASTNode> lhs, rhs;
-};
-struct UnExpr : ASTNode {
-    std::string op;
-    std::unique_ptr<ASTNode> operand;
-};
-struct FieldExpr : ASTNode {
-    std::unique_ptr<ASTNode> object;
-    std::string module_alias, field;
-};
-struct IndexExpr : ASTNode {
-    std::unique_ptr<ASTNode> base, index;
-};
-struct CallExpr : ASTNode {
-    std::unique_ptr<ASTNode> callee;
-    std::vector<std::unique_ptr<ASTNode>> args;
-};
-struct SpawnExpr : ASTNode { std::unique_ptr<ASTNode> expr; };
-struct AwaitExpr : ASTNode { std::unique_ptr<ASTNode> expr; };
- 
-struct ExprStmt   : ASTNode { std::unique_ptr<ASTNode> expr; };
-struct LetStmt    : ASTNode {
-    std::string name;
-    bool is_mutable = false;
-    std::unique_ptr<ASTNode> init;
-};
-struct ReturnStmt : ASTNode { std::unique_ptr<ASTNode> value; };
-struct IfStmt     : ASTNode {
-    std::unique_ptr<ASTNode> cond;
-    std::vector<std::unique_ptr<ASTNode>> then_body;
-    std::unique_ptr<std::vector<std::unique_ptr<ASTNode>>> else_body;
-};
-struct WhileStmt  : ASTNode {
-    std::unique_ptr<ASTNode> cond;
-    std::vector<std::unique_ptr<ASTNode>> body;
-};
-struct BlockStmt  : ASTNode {
-    std::vector<std::unique_ptr<ASTNode>> stmts;
-};
- 
-struct ParamDecl { std::string name; TypePtr type; };
-struct FnDecl    : ASTNode {
-    std::string name;
-    bool is_exported = false, is_async = false;
-    std::vector<ParamDecl> params;
-    std::vector<std::unique_ptr<ASTNode>> body;
-};
- 
-struct Program { std::vector<std::unique_ptr<ASTNode>> stmts; };
- 
-// ═══════════════════════════════════════════════════════════════
-// IRBuilder
-// ═══════════════════════════════════════════════════════════════
- 
 namespace ir {
  
 using Scope = std::unordered_map<std::string, Value*>;
  
-class IRBuilder {
+class IRBuilder
+{
 public:
     IRBuilder() = default;
  
-    // ── Main entry point ─────────────────────────────────────────
-    std::unique_ptr<IRModule> build(const Program& prog,
-                                    const std::string& path = "<stdin>") {
-        mod_ = std::make_unique<IRModule>(path);
-        for (auto& s : prog.stmts) lower_top_level(*s);
-        return std::move(mod_);
+    // ── Entry point ───────────────────────────────────────────────────────────
+    void build(const Program& prog, IRModule* mod)
+    {
+        this->mod_ = mod;
+        for (auto& s : prog.stmts) {
+            if (s) lower_top_level(*s);
+        }
     }
  
-    // ── Cursor ───────────────────────────────────────────────────
+    // ── Cursor ────────────────────────────────────────────────────────────────
     void set_function(Function* fn) { fn_ = fn; }
     void set_block(BasicBlock* bb)  { bb_ = bb; }
     BasicBlock* current_block() const { return bb_; }
     Function*   current_fn()    const { return fn_; }
  
-    // ── Scope ────────────────────────────────────────────────────
+    // ── Scope ─────────────────────────────────────────────────────────────────
     void push_scope() { scopes_.push_back({}); }
     void pop_scope()  { if (!scopes_.empty()) scopes_.pop_back(); }
  
@@ -112,13 +46,12 @@ public:
     }
     Value* lookup(const std::string& name) const {
         for (auto it = scopes_.rbegin(); it != scopes_.rend(); ++it) {
-            auto f = it->find(name);
-            if (f != it->end()) return f->second;
+            auto f = it->find(name); if (f != it->end()) return f->second;
         }
         return nullptr;
     }
  
-    // ── SSA names ────────────────────────────────────────────────
+    // ── SSA names ─────────────────────────────────────────────────────────────
     std::string fresh() { return "%" + std::to_string(counter_++); }
     std::string fresh(const std::string& hint) {
         auto it = name_counts_.find(hint);
@@ -126,52 +59,89 @@ public:
         return "%" + hint + std::to_string(it->second++);
     }
  
-    // ── Emit ─────────────────────────────────────────────────────
+    // ── Emit ──────────────────────────────────────────────────────────────────
     template<typename T, typename... Args>
     T* emit(Args&&... args) {
         if (!bb_) throw std::logic_error("IRBuilder: no active block");
         return bb_->emit<T>(std::forward<Args>(args)...);
     }
  
-    // ── Expression lowering (public for tests) ───────────────────
-    Value* lower_expr(const ASTNode& node) {
-        if (auto* e = dynamic_cast<const LitIntExpr*>(&node))   return lower_lit_int(*e);
-        if (auto* e = dynamic_cast<const LitFloatExpr*>(&node)) return lower_lit_float(*e);
-        if (auto* e = dynamic_cast<const LitBoolExpr*>(&node))  return lower_lit_bool(*e);
-        if (auto* e = dynamic_cast<const LitStrExpr*>(&node))   return lower_lit_str(*e);
-        if (auto* e = dynamic_cast<const IdentExpr*>(&node))    return lower_ident(*e);
-        if (auto* e = dynamic_cast<const BinExpr*>(&node))      return lower_bin(*e);
-        if (auto* e = dynamic_cast<const UnExpr*>(&node))       return lower_un(*e);
-        if (auto* e = dynamic_cast<const CallExpr*>(&node))     return lower_call(*e);
-        if (auto* e = dynamic_cast<const SpawnExpr*>(&node))    return lower_spawn(*e);
-        if (auto* e = dynamic_cast<const AwaitExpr*>(&node))    return lower_await(*e);
-        if (auto* e = dynamic_cast<const FieldExpr*>(&node))    return lower_field(*e);
-        if (auto* e = dynamic_cast<const IndexExpr*>(&node))    return lower_index(*e);
-        throw std::runtime_error("IRBuilder: unhandled expression type");
+    // ── Public lowering ───────────────────────────────────────────────────────
+ 
+    Value* lower_expr(const Expr& e)
+    {
+        switch (e.kind.tag) {
+        case ExprKind::Tag::Lit:        return lower_lit(e);
+        case ExprKind::Tag::Id:         return lower_id(e);
+        case ExprKind::Tag::Binary:     return lower_binary(e);
+        case ExprKind::Tag::Unary:      return lower_unary(e);
+        case ExprKind::Tag::Assign:     return lower_assign(e);
+        case ExprKind::Tag::Call:       return lower_call(e);
+        case ExprKind::Tag::Index:      return lower_index(e);
+        case ExprKind::Tag::Field:      return lower_field_expr(e);
+        case ExprKind::Tag::Scope:      return lower_scope_expr(e);
+        case ExprKind::Tag::Spawn:      return lower_spawn(e);
+        case ExprKind::Tag::Await:      return lower_await(e);
+        case ExprKind::Tag::Grad:       return lower_grad(e);
+        case ExprKind::Tag::If:         return lower_if_expr(e);
+        case ExprKind::Tag::Block:      return lower_block_expr(e);
+        case ExprKind::Tag::Pipe:       return lower_pipe(e);
+        case ExprKind::Tag::Range:      return lower_range(e);
+        case ExprKind::Tag::ChannelSend:return lower_channel_send(e);
+        case ExprKind::Tag::ArrayLit:   return lower_elements_lit(e);
+        case ExprKind::Tag::TensorLit:  return lower_tensor_lit(e);
+        case ExprKind::Tag::TupleLit:
+        case ExprKind::Tag::SetLit:
+        case ExprKind::Tag::QueueLit:
+        case ExprKind::Tag::StackLit:   return lower_elements_lit(e);
+        case ExprKind::Tag::MapLit:     return lower_map_lit(e);
+        case ExprKind::Tag::FnExpr:     return lower_fn_expr(e);
+        case ExprKind::Tag::Match:      return lower_match_expr(e);
+        case ExprKind::Tag::StructLit:  return lower_struct_lit(e);
+        }
+        throw std::runtime_error("IRBuilder: unhandled ExprKind::Tag");
     }
  
-    // ── Statement lowering (public for tests) ────────────────────
-    void lower_stmt(const ASTNode& node) {
-        if (auto* s = dynamic_cast<const LetStmt*>(&node))    { lower_let(*s);       return; }
-        if (auto* s = dynamic_cast<const ReturnStmt*>(&node)) { lower_return(*s);    return; }
-        if (auto* s = dynamic_cast<const IfStmt*>(&node))     { lower_if(*s);        return; }
-        if (auto* s = dynamic_cast<const WhileStmt*>(&node))  { lower_while(*s);     return; }
-        if (auto* s = dynamic_cast<const BlockStmt*>(&node))  { lower_block(*s);     return; }
-        if (auto* s = dynamic_cast<const ExprStmt*>(&node))   { lower_expr_stmt(*s); return; }
-        throw std::runtime_error("IRBuilder: unhandled statement type");
+    Value* lower_stmt(const Stmt& s)
+    {
+        switch (s.kind.tag) {
+        case StmtKind::Tag::Let:      lower_let(s);       return nullptr;
+        case StmtKind::Tag::Func:     lower_func_stmt(s); return nullptr;
+        case StmtKind::Tag::Return:   lower_return(s);    return nullptr;
+        case StmtKind::Tag::If:       lower_if_stmt(s);   return nullptr;
+        case StmtKind::Tag::While:    lower_while(s);     return nullptr;
+        case StmtKind::Tag::For:      lower_for(s);       return nullptr;
+        case StmtKind::Tag::Compound: lower_compound(s.kind.compound); return nullptr;
+        case StmtKind::Tag::Expr:
+            if (s.kind.expr) return lower_expr(*s.kind.expr);
+            return nullptr;
+        case StmtKind::Tag::Break:    lower_break();      return nullptr;
+        case StmtKind::Tag::Continue: lower_continue();   return nullptr;
+        case StmtKind::Tag::Match:    lower_match_stmt(s);return nullptr;
+        case StmtKind::Tag::Spawn:
+            if (s.kind.spawn_fn) lower_stmt(*s.kind.spawn_fn);
+            return nullptr;
+        case StmtKind::Tag::Import:   // handled by ImportResolver
+        case StmtKind::Tag::Struct:   // type declaration, no IR
+        case StmtKind::Tag::Else:     // only valid inside If chain
+        default:
+            return nullptr;
+        }
     }
  
 private:
-    std::unique_ptr<IRModule> mod_;
+    ir::IRModule* mod_;
     Function*   fn_      = nullptr;
     BasicBlock* bb_      = nullptr;
     int         counter_ = 0;
     std::unordered_map<std::string, int> name_counts_;
     std::vector<Scope> scopes_;
     std::vector<BasicBlock*> loop_exit_stack_;
+    std::vector<BasicBlock*> loop_header_stack_;
     std::unordered_map<Value*, ValuePtr> ptr_cache_;
+    std::unordered_map<std::string, Function*> global_functions;
  
-    // non-owning shared_ptr alias
+    // Non-owning shared_ptr alias so raw Value* can be passed as ValuePtr
     ValuePtr vp(Value* v) {
         if (!v) return nullptr;
         auto it = ptr_cache_.find(v);
@@ -183,160 +153,576 @@ private:
         Value* r = c.get(); ptr_cache_[r] = std::move(c); return r;
     }
  
-    // ── Top-level ────────────────────────────────────────────────
-    void lower_top_level(const ASTNode& node) {
-        if (auto* d = dynamic_cast<const FnDecl*>(&node))  { lower_fn_decl(*d);    return; }
-        if (auto* s = dynamic_cast<const LetStmt*>(&node)) { lower_global_let(*s); return; }
+    // ── TyKind → TypePtr ──────────────────────────────────────────────────────
+    static TypePtr ty(TyKind tk) {
+        switch (tk) {
+        case TyKind::Void:   return Type::void_();
+        case TyKind::Bool:   return Type::bool_();
+        case TyKind::I32:    return Type::i32();
+        case TyKind::I64:    return Type::i64();
+        case TyKind::F32:    return Type::f32();
+        case TyKind::F64:    return Type::f64();
+        case TyKind::Str:    return Type::str_();
+        case TyKind::Tensor: return Type::tensor(Type::f32());
+        case TyKind::Array:  return Type::array(Type::infer());
+        default:             return Type::infer();
+        }
     }
  
-    void lower_fn_decl(const FnDecl& d) {
-        TypePtr ft = d.resolved_type ? d.resolved_type : Type::fn({}, Type::void_());
-        Function* fn = mod_->add_function(d.name, ft, d.is_async);
-        fn->is_exported = d.is_exported;
+    TypePtr expr_type(const Expr& e) const {
+        if (e.resolved_type) return e.resolved_type;
+        if (e.kind.tag == ExprKind::Tag::Id) return ty(e.kind.id.ty_kind());
+        return Type::infer();
+    }
+ 
+    // ── Top-level ─────────────────────────────────────────────────────────────
+    void lower_top_level(const Stmt& s) {
+        switch (s.kind.tag) {
+        case StmtKind::Tag::Func:   lower_func_stmt(s); break;
+        case StmtKind::Tag::Let:    lower_global_let(s); break;
+        default: break;
+        }
+    }
+ 
+    void lower_func_stmt(const Stmt& s) {
+        if (s.kind.func) lower_func(*s.kind.func);
+    }
+ 
+    void lower_func(const Func& f) {
+        std::vector<TypePtr> ptypes;
+        for (auto& p : f.params) ptypes.push_back(ty(p.ty_kind()));
+        TypePtr ret_ty  = ty(f.ident.ty_kind());
+        TypePtr fn_type = Type::fn(ptypes, ret_ty);
+ 
+        Function* fn = mod_->add_function("@" + f.ident.name(), fn_type, f.is_async);
+        global_functions[f.ident.name()] = fn;
         set_function(fn); push_scope();
-        BasicBlock* entry = fn->create_entry(); set_block(entry);
-        for (auto& p : d.params) { Argument* a = fn->add_param("%" + p.name, p.type); define(p.name, a); }
-        lower_stmts(d.body);
+        set_block(fn->create_entry());
+ 
+        for (auto& p : f.params) {
+            Argument* a = fn->add_param("%" + p.name(), ty(p.ty_kind()));
+            define(p.name(), a);
+        }
+        lower_compound(f.body);
         if (!bb_->is_terminated()) emit<ReturnInst>();
         pop_scope(); set_function(nullptr); set_block(nullptr);
     }
  
-    void lower_global_let(const LetStmt& s) {
-        auto v = make_const_lit(*s.init); v->name = "@" + s.name; mod_->add_global(std::move(v));
+    void lower_global_let(const Stmt& s) {
+        if (!s.kind.let_expr) return;
+        auto cv = make_const_from_expr(*s.kind.let_expr);
+        if (!cv) return;
+        cv->name = "@" + s.kind.let_ident.name();
+        mod_->add_global(std::move(cv));
     }
  
-    void lower_stmts(const std::vector<std::unique_ptr<ASTNode>>& stmts) {
-        for (auto& s : stmts) lower_stmt(*s);
-    }
-    void lower_block(const BlockStmt& s) { push_scope(); lower_stmts(s.stmts); pop_scope(); }
- 
-    void lower_let(const LetStmt& s) {
-        Value* rhs = lower_expr(*s.init);
-        if (s.is_mutable) {
-            auto* alloca = emit<AllocaInst>(fresh(s.name + ".slot"), rhs->type);
-            emit<StoreInst>(vp(rhs), vp(alloca));
-            define(s.name, alloca);
-        } else {
-            if (rhs->name.empty() || rhs->name[0] == '%') rhs->name = "%" + s.name;
-            define(s.name, rhs);
+    void lower_compound(const Compound& c) {
+        push_scope();
+        for (auto& stmt : c.stmts) {
+            if (stmt) lower_stmt(*stmt);
         }
+        if (c.tail_expr) lower_expr(*c.tail_expr);
+        pop_scope();
     }
  
-    void lower_return(const ReturnStmt& s) {
-        if (s.value) emit<ReturnInst>(vp(lower_expr(*s.value)));
-        else         emit<ReturnInst>();
+    // ── Statements ────────────────────────────────────────────────────────────
+ 
+    void lower_let(const Stmt& s) {
+        const Ident& id = s.kind.let_ident;
+        if (!s.kind.let_expr) {
+            // Uninitialized mutable — emit alloca
+            auto* alloca = emit<AllocaInst>(fresh(id.name()), ty(id.ty_kind()));
+            define(id.name(), alloca);
+            return;
+        }
+        Value* rhs = lower_expr(*s.kind.let_expr);
+        rhs->name = "%" + id.name();
+        define(id.name(), rhs);
     }
  
-    void lower_if(const IfStmt& s) {
-        Value* cond    = lower_expr(*s.cond);
-        auto* then_bb  = fn_->add_block(fresh_label("if.true"));
-        auto* else_bb  = s.else_body ? fn_->add_block(fresh_label("if.false")) : nullptr;
-        auto* merge_bb = fn_->add_block(fresh_label("if.merge"));
+    void lower_return(const Stmt& s) {
+        if (s.kind.ret_expr) emit<ReturnInst>(vp(lower_expr(*s.kind.ret_expr)));
+        else                  emit<ReturnInst>();
+    }
+ 
+    void lower_if_stmt(const Stmt& s) {
+        Value* cond     = lower_expr(*s.kind.if_cond);
+        auto* then_bb   = fn_->add_block(fresh_label("if.true"));
+        auto* merge_bb  = fn_->add_block(fresh_label("if.merge"));
+        auto* else_bb   = s.kind.else_or_else_if
+                        ? fn_->add_block(fresh_label("if.false"))
+                        : nullptr;
+ 
         emit<CondBranchInst>(vp(cond), then_bb, else_bb ? else_bb : merge_bb);
  
-        set_block(then_bb); push_scope(); lower_stmts(s.then_body); pop_scope();
+        set_block(then_bb);
+        lower_compound(s.kind.if_body);
         if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
  
-        if (else_bb) {
-            set_block(else_bb); push_scope(); lower_stmts(*s.else_body); pop_scope();
+        if (else_bb && s.kind.else_or_else_if) {
+            set_block(else_bb);
+            lower_stmt(*s.kind.else_or_else_if);
             if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
         }
         set_block(merge_bb);
     }
  
-    void lower_while(const WhileStmt& s) {
-        auto* header = fn_->add_block(fresh_label("loop.header"));
-        auto* body   = fn_->add_block(fresh_label("loop.body"));
-        auto* exit   = fn_->add_block(fresh_label("loop.exit"));
+    void lower_while(const Stmt& s) {
+        auto* header = fn_->add_block(fresh_label("while.cond"));
+        auto* body   = fn_->add_block(fresh_label("while.body"));
+        auto* exit   = fn_->add_block(fresh_label("while.exit"));
         emit<BranchInst>(header);
-        set_block(header); Value* cond = lower_expr(*s.cond);
-        emit<CondBranchInst>(vp(cond), body, exit);
+ 
+        set_block(header);
+        if (s.kind.while_cond) {
+            emit<CondBranchInst>(vp(lower_expr(*s.kind.while_cond)), body, exit);
+        } else {
+            emit<BranchInst>(body); // infinite loop
+        }
+ 
         loop_exit_stack_.push_back(exit);
-        set_block(body); push_scope(); lower_stmts(s.body); pop_scope();
+        loop_header_stack_.push_back(header);
+        set_block(body);
+        lower_compound(s.kind.while_body);
         if (!bb_->is_terminated()) emit<BranchInst>(header);
         loop_exit_stack_.pop_back();
+        loop_header_stack_.pop_back();
         set_block(exit);
     }
  
-    void lower_expr_stmt(const ExprStmt& s) { lower_expr(*s.expr); }
+    void lower_for(const Stmt& s) {
+        Value* iter_val = lower_expr(*s.kind.for_iter);
+        auto* header = fn_->add_block(fresh_label("for.cond"));
+        auto* body   = fn_->add_block(fresh_label("for.body"));
+        auto* exit   = fn_->add_block(fresh_label("for.exit"));
+        emit<BranchInst>(header);
  
-    Value* lower_lit_int(const LitIntExpr& e)   { return keep(std::make_shared<ConstantInt>(e.value, e.resolved_type)); }
-    Value* lower_lit_float(const LitFloatExpr& e){ return keep(std::make_shared<ConstantFloat>(e.value, e.resolved_type)); }
-    Value* lower_lit_bool(const LitBoolExpr& e)  { return keep(std::make_shared<ConstantBool>(e.value)); }
-    Value* lower_lit_str(const LitStrExpr& e)    { return keep(std::make_shared<ConstantString>(e.value)); }
+        // Placeholder has_next condition
+        set_block(header);
+        auto placeholder = std::make_shared<ConstantBool>(true);
+        keep(placeholder);
+        emit<CondBranchInst>(vp(placeholder.get()), body, exit);
  
-    Value* lower_ident(const IdentExpr& e) {
-        Value* v = lookup(e.name);
-        if (!v) throw std::runtime_error("IRBuilder: undefined name '" + e.name + "'");
-        if (dynamic_cast<AllocaInst*>(v)) return emit<LoadInst>(fresh(e.name), v->type, vp(v));
+        loop_exit_stack_.push_back(exit);
+        loop_header_stack_.push_back(header);
+        set_block(body); push_scope();
+        // Bind loop variable as placeholder
+        auto lv = std::make_shared<Value>("%" + s.kind.for_var, Type::infer());
+        keep(lv); define(s.kind.for_var, lv.get());
+        lower_compound(s.kind.for_body);
+        pop_scope();
+        if (!bb_->is_terminated()) emit<BranchInst>(header);
+        loop_exit_stack_.pop_back();
+        loop_header_stack_.pop_back();
+        set_block(exit);
+        (void)iter_val;
+    }
+ 
+    void lower_break() {
+        if (loop_exit_stack_.empty())
+            throw std::runtime_error("IRBuilder: break outside loop");
+        emit<BranchInst>(loop_exit_stack_.back());
+        set_block(fn_->add_block(fresh_label("dead")));
+    }
+ 
+    void lower_continue() {
+        if (loop_header_stack_.empty())
+            throw std::runtime_error("IRBuilder: continue outside loop");
+        emit<BranchInst>(loop_header_stack_.back());
+        set_block(fn_->add_block(fresh_label("dead")));
+    }
+ 
+    void lower_match_stmt(const Stmt& s) {
+        lower_expr(*s.kind.match_subject);
+        // Full pattern compilation is a separate pass
+    }
+ 
+    // ── Expressions ───────────────────────────────────────────────────────────
+ 
+    Value* lower_lit(const Expr& e) {
+        const LitKind& lit = e.kind.lit;
+        switch (lit.tag) {
+        case LitKind::Tag::Int:
+            return keep(std::make_shared<ConstantInt>(
+                std::stoll(lit.str_val),
+                e.resolved_type ? e.resolved_type : Type::i64()));
+        case LitKind::Tag::Float:
+            return keep(std::make_shared<ConstantFloat>(
+                std::stod(lit.str_val),
+                e.resolved_type ? e.resolved_type : Type::f64()));
+        case LitKind::Tag::Bool:
+            return keep(std::make_shared<ConstantBool>(lit.bool_val));
+        case LitKind::Tag::Str:
+            return keep(std::make_shared<ConstantString>(lit.str_val));
+        }
+        throw std::runtime_error("IRBuilder: unknown LitKind");
+    }
+ 
+    Value* lower_id(const Expr& e) {
+        const std::string& name = e.kind.id.name();
+        Value* v = lookup(name);
+        if (!v) throw std::runtime_error("IRBuilder: undefined name '" + name + "'");
+        if (dynamic_cast<AllocaInst*>(v))
+            return emit<LoadInst>(fresh(name), v->type, vp(v));
         return v;
     }
  
-    Value* lower_bin(const BinExpr& e) {
-        Value* l = lower_expr(*e.lhs), *r = lower_expr(*e.rhs);
-        TypePtr ty = e.resolved_type;
-        return emit<BinOpInst>(fresh(), ty, ast_binop(e.op, ty), vp(l), vp(r));
+    Value* lower_binary(const Expr& e) {
+        if (!e.kind.lhs || !e.kind.rhs) {
+            throw std::runtime_error("IRBuilder: Malformed binary expression (null operand)");
+        }
+        TypePtr ty_  = expr_type(e);
+        // Comparison → CmpInst
+        switch (e.kind.bin_op) {
+        case BinOp::Eq:     { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Eq,vp(l),vp(r)); }
+        case BinOp::Neq:    { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Ne,vp(l),vp(r)); }
+        case BinOp::Lt:     { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Lt,vp(l),vp(r)); }
+        case BinOp::Lte:    { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Le,vp(l),vp(r)); }
+        case BinOp::Gt:     { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Gt,vp(l),vp(r)); }
+        case BinOp::Gte:    { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Ge,vp(l),vp(r)); }
+        case BinOp::MatMul: {
+            auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs);
+            return emit<TensorOpInst>(fresh(),ty_,TensorOpCode::MatMul,std::vector<ValuePtr>{vp(l),vp(r)});
+        }
+        default: break;
+        }
+        // Arithmetic / logical → BinOpInst
+        Value* lhs = lower_expr(*e.kind.lhs);
+        Value* rhs = lower_expr(*e.kind.rhs);
+        bool f = ty_ && ty_->is_float();
+        BinOpCode op;
+        switch (e.kind.bin_op) {
+        case BinOp::Add: op = f ? BinOpCode::FAdd : BinOpCode::Add; break;
+        case BinOp::Sub: op = f ? BinOpCode::FSub : BinOpCode::Sub; break;
+        case BinOp::Mul: op = f ? BinOpCode::FMul : BinOpCode::Mul; break;
+        case BinOp::Div: op = f ? BinOpCode::FDiv : BinOpCode::Div; break;
+        case BinOp::And: op = BinOpCode::And; break;
+        case BinOp::Or:  op = BinOpCode::Or;  break;
+        default: throw std::runtime_error("IRBuilder: unhandled BinOp");
+        }
+        return emit<BinOpInst>(fresh(), ty_, op, vp(lhs), vp(rhs));
     }
  
-    Value* lower_un(const UnExpr& e) {
-        Value* o = lower_expr(*e.operand); TypePtr ty = e.resolved_type;
-        return emit<UnOpInst>(fresh(), ty, ast_unop(e.op, ty), vp(o));
+    Value* lower_unary(const Expr& e) {
+        Value* operand = lower_expr(*e.kind.operand);
+        TypePtr ty_ = expr_type(e);
+        bool f = ty_ && ty_->is_float();
+        UnOpCode op = (e.kind.unary_op == UnaryOp::Neg)
+                    ? (f ? UnOpCode::FNeg : UnOpCode::Neg)
+                    : UnOpCode::Not;
+        return emit<UnOpInst>(fresh(), ty_, op, vp(operand));
     }
  
-    Value* lower_call(const CallExpr& e) {
-        if (auto* f = dynamic_cast<const FieldExpr*>(e.callee.get()))
-            return lower_tensor_call(*f, e.args, e.resolved_type);
-        Value* callee = lower_expr(*e.callee);
+    Value* lower_assign(const Expr& e) {
+        if (!e.kind.lhs || !e.kind.rhs) return nullptr;
+        Value* rhs_val = nullptr;
+        if (e.kind.bin_op == BinOp::Assign) {
+            rhs_val = lower_expr(*e.kind.rhs);
+        } else {
+            Value* cur = lower_expr(*e.kind.lhs);
+            Value* rhs = lower_expr(*e.kind.rhs);
+            TypePtr ty_ = expr_type(e);
+            bool f = ty_ && ty_->is_float();
+            BinOpCode op;
+            switch (e.kind.bin_op) {
+            case BinOp::AddAssign: op = f ? BinOpCode::FAdd : BinOpCode::Add; break;
+            case BinOp::SubAssign: op = f ? BinOpCode::FSub : BinOpCode::Sub; break;
+            case BinOp::MulAssign: op = f ? BinOpCode::FMul : BinOpCode::Mul; break;
+            case BinOp::DivAssign: op = f ? BinOpCode::FDiv : BinOpCode::Div; break;
+            default: throw std::runtime_error("IRBuilder: unknown compound assign");
+            }
+            rhs_val = emit<BinOpInst>(fresh(), ty_, op, vp(cur), vp(rhs));
+        }
+        store_to_lvalue(*e.kind.lhs, rhs_val);
+        return rhs_val;
+    }
+ 
+    void store_to_lvalue(const Expr& lval, Value* val) {
+        if (lval.kind.tag == ExprKind::Tag::Id) {
+            const std::string& name = lval.kind.id.name();
+            Value* slot = lookup(name);
+            if (!slot) throw std::runtime_error("IRBuilder: assign to undefined '" + name + "'");
+            if (dynamic_cast<AllocaInst*>(slot)) {
+                emit<StoreInst>(vp(val), vp(slot));
+            } else {
+                // Promote to mutable slot
+                auto* alloca = emit<AllocaInst>(fresh(name + ".slot"), val->type);
+                emit<StoreInst>(vp(val), vp(alloca));
+                define(name, alloca);
+            }
+        } else if (lval.kind.tag == ExprKind::Tag::Index) {
+            Value* base  = lower_expr(*lval.kind.target);
+            Value* index = lower_expr(*lval.kind.index);
+            emit<TensorOpInst>("", Type::void_(), TensorOpCode::Scatter,
+                std::vector<ValuePtr>{vp(base), vp(index), vp(val)});
+        } else {
+            throw std::runtime_error("IRBuilder: unsupported lvalue");
+        }
+    }
+ 
+    Value* lower_call(const Expr& e) {
+        const Expr& callee = *e.kind.callee;
+        TypePtr ret = expr_type(e);
         std::vector<ValuePtr> args;
-        for (auto& a : e.args) args.push_back(vp(lower_expr(*a)));
-        TypePtr ret = e.resolved_type;
-        return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(callee), std::move(args));
+        if (callee.kind.tag == ExprKind::Tag::Scope) {
+            std::string ns = callee.kind.target->kind.id.name();
+            if (ns == "ts") {
+                return lower_tensor_call(callee, e.kind.args, ret);
+            } 
+            if (ns == "std") {
+                return lower_std_call(callee.kind.member, e.kind.args, ret);
+            }
+        }
+        for (auto& a : e.kind.args) {
+            args.push_back(vp(lower_expr(*a)));
+        }
+        if (callee.kind.tag == ExprKind::Tag::Id) {
+            std::string name = callee.kind.id.name();
+            auto it = global_functions.find(name);
+            if (it != global_functions.end()) {
+                Function* fn = it->second;
+                return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(fn), std::move(args));
+            }
+        }
+        Value* callee_val = lower_expr(callee); 
+        return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(callee_val), std::move(args));
     }
  
-    Value* lower_spawn(const SpawnExpr& e) {
-        return emit<SpawnInst>(fresh("h"), Type::infer(), vp(lower_expr(*e.expr)));
-    }
-    Value* lower_await(const AwaitExpr& e) {
-        return emit<AwaitInst>(fresh(), e.resolved_type, vp(lower_expr(*e.expr)));
-    }
-    Value* lower_field(const FieldExpr& e) {
-        Value* v = lookup(e.module_alias + "::" + e.field);
-        if (!v) throw std::runtime_error("IRBuilder: unresolved field '" + e.module_alias + "::" + e.field + "'");
-        return v;
-    }
-    Value* lower_index(const IndexExpr& e) {
-        return emit<TensorOpInst>(fresh(), e.resolved_type, TensorOpCode::Select,
-            std::vector<ValuePtr>{ vp(lower_expr(*e.base)), vp(lower_expr(*e.index)) });
-    }
- 
-    Value* lower_tensor_call(const FieldExpr& field,
-                              const std::vector<std::unique_ptr<ASTNode>>& ast_args,
-                              TypePtr ret_type) {
+    Value* lower_tensor_call(const Expr& scope_callee,
+                              const std::vector<ExprPtr>& ast_args,
+                              TypePtr ret_type)
+    {
+        TensorOpCode op = resolve_tensor_op(scope_callee.kind.member);
         std::vector<ValuePtr> args;
         for (auto& a : ast_args) args.push_back(vp(lower_expr(*a)));
-        TensorOpCode op = resolve_tensor_op(field.field);
         return emit<TensorOpInst>(op_is_void(op) ? "" : fresh(), ret_type, op, std::move(args));
     }
- 
-    static BinOpCode ast_binop(const std::string& op, const TypePtr& ty) {
-        bool f = ty && ty->is_float();
-        if (op == "+")  return f ? BinOpCode::FAdd : BinOpCode::Add;
-        if (op == "-")  return f ? BinOpCode::FSub : BinOpCode::Sub;
-        if (op == "*")  return f ? BinOpCode::FMul : BinOpCode::Mul;
-        if (op == "/")  return f ? BinOpCode::FDiv : BinOpCode::Div;
-        if (op == "%")  return BinOpCode::Mod;
-        if (op == "&")  return BinOpCode::And;
-        if (op == "|")  return BinOpCode::Or;
-        if (op == "^")  return BinOpCode::Xor;
-        if (op == "<<") return BinOpCode::Shl;
-        if (op == ">>") return BinOpCode::Shr;
-        throw std::runtime_error("IRBuilder: unknown op '" + op + "'");
+
+    Value* lower_std_call(const std::string& func_name, const std::vector<ExprPtr>& args, TypePtr ret) {
+        std::vector<ValuePtr> ir_args;
+        for (auto& a : args) ir_args.push_back(vp(lower_expr(*a)));
+        // Look for a built-in function named "@std.println" or similar
+        Function* std_fn = nullptr;
+        std::string mangled_name = "@std." + func_name;
+        if (global_functions.count(mangled_name)) {
+            std_fn = global_functions[mangled_name];
+        } else {
+            std::vector<TypePtr> arg_types;
+            for (auto& v : ir_args) arg_types.push_back(v->type);
+            std_fn = mod_->add_function(mangled_name, Type::fn(arg_types, ret), false);
+            global_functions[mangled_name] = std_fn;
+        }
+
+        return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(std_fn), std::move(ir_args), false);
     }
-    static UnOpCode ast_unop(const std::string& op, const TypePtr& ty) {
-        bool f = ty && ty->is_float();
-        if (op == "-") return f ? UnOpCode::FNeg : UnOpCode::Neg;
-        if (op == "!") return UnOpCode::Not;
-        throw std::runtime_error("IRBuilder: unknown op '" + op + "'");
+ 
+    Value* lower_index(const Expr& e) {
+        Value* base  = lower_expr(*e.kind.target);
+        Value* index = lower_expr(*e.kind.index);
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Select,
+            std::vector<ValuePtr>{vp(base), vp(index)});
+    }
+ 
+    Value* lower_field_expr(const Expr& e) {
+        Value* obj = lower_expr(*e.kind.target);
+        std::string qname = obj->name + "." + e.kind.member;
+        if (Value* v = lookup(qname)) return v;
+        return emit<LoadInst>(fresh(e.kind.member), expr_type(e), vp(obj));
+    }
+ 
+    Value* lower_scope_expr(const Expr& e) {
+        // e.kind.target must be an Id (the namespace)
+        const std::string& ns   = e.kind.target->kind.id.name();
+        const std::string& item = e.kind.member;
+        if (Value* v = lookup(ns + "::" + item)) return v;
+        throw std::runtime_error("IRBuilder: unresolved '" + ns + "::" + item + "'");
+    }
+ 
+    Value* lower_spawn(const Expr& e) {
+        Value* task = lower_expr(*e.kind.spawned_expr);
+        return emit<SpawnInst>(fresh("h"), Type::infer(), vp(task));
+    }
+ 
+    Value* lower_await(const Expr& e) {
+        if (!e.kind.operand) {
+            throw std::runtime_error("IRBuilder Error: 'await' expression is missing its target operand.");
+        }
+        Value* handle = lower_expr(*e.kind.operand);
+        return emit<AwaitInst>(fresh("await_tmp"), expr_type(e), vp(handle));
+    }
+ 
+    Value* lower_grad(const Expr& e) {
+        Value* loss   = lower_expr(*e.kind.grad_loss);
+        Value* params = lower_expr(*e.kind.grad_params);
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Grad,
+            std::vector<ValuePtr>{vp(loss), vp(params)});
+    }
+ 
+    Value* lower_if_expr(const Expr& e) {
+        Value* cond = lower_expr(*e.kind.condition);
+        auto* then_bb  = fn_->add_block(fresh_label("ifexpr.true"));
+        auto* else_bb  = fn_->add_block(fresh_label("ifexpr.false"));
+        auto* merge_bb = fn_->add_block(fresh_label("ifexpr.merge"));
+        emit<CondBranchInst>(vp(cond), then_bb, else_bb);
+ 
+        set_block(then_bb);
+        Value* then_val = e.kind.then_branch ? lower_expr(*e.kind.then_branch) : nullptr;
+        BasicBlock* then_exit = bb_;
+        if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
+ 
+        set_block(else_bb);
+        Value* else_val = e.kind.else_branch ? lower_expr(*e.kind.else_branch) : nullptr;
+        BasicBlock* else_exit = bb_;
+        if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
+ 
+        set_block(merge_bb);
+        if (then_val && else_val) {
+            auto* phi = emit<PhiInst>(fresh("ifval"), expr_type(e));
+            phi->add_incoming(vp(then_val), then_exit);
+            phi->add_incoming(vp(else_val), else_exit);
+            return phi;
+        }
+        return then_val ? then_val : else_val;
+    }
+ 
+    Value* lower_block_expr(const Expr& e) {
+        push_scope();
+        for (auto& stmt : e.kind.block.stmts) lower_stmt(*stmt);
+        Value* result = nullptr;
+        if (e.kind.block.tail_expr) result = lower_expr(*e.kind.block.tail_expr);
+        pop_scope();
+        return result;
+    }
+ 
+    Value* lower_pipe(const Expr& e) {
+        Value* lhs_val = lower_expr(*e.kind.pipe_lhs);
+        if (e.kind.pipe_rhs->kind.tag == ExprKind::Tag::Call) {
+            const Expr& call_e = *e.kind.pipe_rhs;
+            Value* callee_val = lower_expr(*call_e.kind.callee);
+            std::vector<ValuePtr> args;
+            args.push_back(vp(lhs_val));
+            for (auto& a : call_e.kind.args) args.push_back(vp(lower_expr(*a)));
+            TypePtr ret = expr_type(e);
+            return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(callee_val), std::move(args));
+        } else {
+            Value* fn_val = lower_expr(*e.kind.pipe_rhs);
+            TypePtr ret = expr_type(e);
+            return emit<CallInst>(ret->is_void() ? "" : fresh(), ret,
+                vp(fn_val), std::vector<ValuePtr>{vp(lhs_val)});
+        }
+    }
+ 
+    Value* lower_range(const Expr& e) {
+        Value* lo = lower_expr(*e.kind.lhs);
+        Value* hi = lower_expr(*e.kind.rhs);
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Arange,
+            std::vector<ValuePtr>{vp(lo), vp(hi)});
+    }
+ 
+    Value* lower_channel_send(const Expr& e) {
+        Value* ch  = lower_expr(*e.kind.channel);
+        Value* val = lower_expr(*e.kind.send_val);
+        auto callee = std::make_shared<Value>("__channel_send", Type::fn({}, Type::void_()));
+        keep(callee);
+        emit<CallInst>("", Type::void_(), vp(callee.get()),
+            std::vector<ValuePtr>{vp(ch), vp(val)});
+        return nullptr;
+    }
+ 
+    Value* lower_elements_lit(const Expr& e) {
+        std::vector<ValuePtr> elems;
+        for (auto& el : e.kind.elements) elems.push_back(vp(lower_expr(*el)));
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::FromList, std::move(elems));
+    }
+ 
+    Value* lower_tensor_lit(const Expr& e) {
+        std::vector<ValuePtr> elems;
+        for (auto& row : e.kind.rows)
+            for (auto& el : row) elems.push_back(vp(lower_expr(*el)));
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::FromList, std::move(elems));
+    }
+ 
+    Value* lower_map_lit(const Expr& e) {
+        std::vector<ValuePtr> elems;
+        for (auto& [k, v] : e.kind.map_pairs) {
+            elems.push_back(vp(lower_expr(*k)));
+            elems.push_back(vp(lower_expr(*v)));
+        }
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::FromList, std::move(elems));
+    }
+ 
+    Value* lower_fn_expr(const Expr& e) {
+        std::string name = fresh_label("__lambda");
+        std::vector<TypePtr> ptypes;
+        for (auto& [pname, pk] : e.kind.fn_params) ptypes.push_back(ty(pk));
+        TypePtr ret_ty  = ty(e.kind.fn_ret_type);
+        TypePtr fn_type = Type::fn(ptypes, ret_ty);
+        Function* fn = mod_->add_function("@" + name, fn_type, e.kind.is_async_fn);
+ 
+        // Stash builder state
+        Function* sfn = fn_; BasicBlock* sbb = bb_;
+        auto sscopes = scopes_; scopes_.clear(); int sc = counter_;
+ 
+        set_function(fn); push_scope();
+        set_block(fn->create_entry());
+        for (auto& [pname, pk] : e.kind.fn_params) {
+            Argument* a = fn->add_param("%" + pname, ty(pk));
+            define(pname, a);
+        }
+        lower_compound(e.kind.fn_body);
+        if (!bb_->is_terminated()) emit<ReturnInst>();
+        pop_scope();
+ 
+        fn_ = sfn; bb_ = sbb; scopes_ = std::move(sscopes); counter_ = sc;
+ 
+        auto fn_val = std::make_shared<Value>("@" + name, fn_type);
+        keep(fn_val);
+        return fn_val.get();
+    }
+ 
+    Value* lower_match_expr(const Expr& e) {
+        lower_expr(*e.kind.match_subject);
+        auto undef = std::make_shared<Value>(fresh("match_undef"), expr_type(e));
+        keep(undef); return undef.get();
+    }
+ 
+    Value* lower_struct_lit(const Expr& e) {
+        TypePtr ty_ = expr_type(e);
+        auto* alloca = emit<AllocaInst>(fresh(e.kind.struct_init_name), ty_);
+        for (auto& [fname, fexpr] : e.kind.struct_init_fields) {
+            Value* fval = lower_expr(*fexpr);
+            std::string qname = alloca->name + "." + fname;
+            auto* fslot = emit<AllocaInst>(qname, fval->type);
+            emit<StoreInst>(vp(fval), vp(fslot));
+            define(qname, fslot);
+        }
+        return alloca;
+    }
+ 
+    // ── Helpers ───────────────────────────────────────────────────────────────
+ 
+    std::string fresh_label(const std::string& base) {
+        auto it = name_counts_.find(base);
+        if (it == name_counts_.end()) { name_counts_[base] = 1; return base; }
+        return base + std::to_string(it->second++);
+    }
+ 
+    std::shared_ptr<Value> make_const_from_expr(const Expr& e) {
+        if (e.kind.tag != ExprKind::Tag::Lit) return nullptr;
+        const LitKind& lit = e.kind.lit;
+        switch (lit.tag) {
+        case LitKind::Tag::Int:
+            return std::make_shared<ConstantInt>(std::stoll(lit.str_val),
+                e.resolved_type ? e.resolved_type : Type::i64());
+        case LitKind::Tag::Float:
+            return std::make_shared<ConstantFloat>(std::stod(lit.str_val),
+                e.resolved_type ? e.resolved_type : Type::f64());
+        case LitKind::Tag::Bool:
+            return std::make_shared<ConstantBool>(lit.bool_val);
+        case LitKind::Tag::Str:
+            return std::make_shared<ConstantString>(lit.str_val);
+        }
+        return nullptr;
     }
  
     static TensorOpCode resolve_tensor_op(const std::string& n) {
@@ -359,22 +745,21 @@ private:
             {"max",TensorOpCode::Max},{"min",TensorOpCode::Min},
             {"prod",TensorOpCode::Prod},{"norm",TensorOpCode::Norm},
             {"std",TensorOpCode::Std},{"var",TensorOpCode::Var},
-            {"median",TensorOpCode::Median},{"sum_dim",TensorOpCode::SumDim},
-            {"mean_dim",TensorOpCode::MeanDim},{"max_dim",TensorOpCode::MaxDim},
-            {"min_dim",TensorOpCode::MinDim},{"argmax",TensorOpCode::ArgMax},
-            {"argmin",TensorOpCode::ArgMin},{"exp",TensorOpCode::Exp},
-            {"log",TensorOpCode::Log},{"log2",TensorOpCode::Log2},
-            {"log1p",TensorOpCode::Log1p},{"sqrt",TensorOpCode::Sqrt},
-            {"rsqrt",TensorOpCode::Rsqrt},{"abs",TensorOpCode::Abs},
-            {"sign",TensorOpCode::Sign},{"sin",TensorOpCode::Sin},
-            {"cos",TensorOpCode::Cos},{"tan",TensorOpCode::Tan},
-            {"floor",TensorOpCode::Floor},{"ceil",TensorOpCode::Ceil},
-            {"round",TensorOpCode::Round},{"pow",TensorOpCode::Pow},
-            {"clamp",TensorOpCode::Clamp},{"lerp",TensorOpCode::Lerp},
-            {"relu",TensorOpCode::Relu},{"relu6",TensorOpCode::Relu6},
-            {"silu",TensorOpCode::Silu},{"gelu",TensorOpCode::Gelu},
-            {"sigmoid",TensorOpCode::Sigmoid},{"tanh",TensorOpCode::Tanh},
-            {"softmax",TensorOpCode::Softmax},{"log_softmax",TensorOpCode::LogSoftmax},
+            {"median",TensorOpCode::Median},{"argmax",TensorOpCode::ArgMax},
+            {"argmin",TensorOpCode::ArgMin},
+            {"exp",TensorOpCode::Exp},{"log",TensorOpCode::Log},
+            {"log2",TensorOpCode::Log2},{"log1p",TensorOpCode::Log1p},
+            {"sqrt",TensorOpCode::Sqrt},{"rsqrt",TensorOpCode::Rsqrt},
+            {"abs",TensorOpCode::Abs},{"sign",TensorOpCode::Sign},
+            {"sin",TensorOpCode::Sin},{"cos",TensorOpCode::Cos},
+            {"tan",TensorOpCode::Tan},{"floor",TensorOpCode::Floor},
+            {"ceil",TensorOpCode::Ceil},{"round",TensorOpCode::Round},
+            {"pow",TensorOpCode::Pow},{"clamp",TensorOpCode::Clamp},
+            {"lerp",TensorOpCode::Lerp},{"relu",TensorOpCode::Relu},
+            {"relu6",TensorOpCode::Relu6},{"silu",TensorOpCode::Silu},
+            {"gelu",TensorOpCode::Gelu},{"sigmoid",TensorOpCode::Sigmoid},
+            {"tanh",TensorOpCode::Tanh},{"softmax",TensorOpCode::Softmax},
+            {"log_softmax",TensorOpCode::LogSoftmax},
             {"leaky_relu",TensorOpCode::LeakyRelu},{"elu",TensorOpCode::Elu},
             {"selu",TensorOpCode::Selu},{"prelu",TensorOpCode::Prelu},
             {"dot",TensorOpCode::Dot},{"matmul",TensorOpCode::MatMul},
@@ -389,29 +774,19 @@ private:
             {"where",TensorOpCode::Where},{"nonzero",TensorOpCode::NonZero},
             {"backward",TensorOpCode::Backward},{"grad",TensorOpCode::Grad},
             {"no_grad",TensorOpCode::NoGrad},{"detach",TensorOpCode::Detach},
-            {"zero_grad",TensorOpCode::ZeroGrad},{"requires_grad",TensorOpCode::RequiresGrad},
+            {"zero_grad",TensorOpCode::ZeroGrad},
+            {"requires_grad",TensorOpCode::RequiresGrad},
         };
         auto it = T.find(n);
-        if (it == T.end()) throw std::runtime_error("IRBuilder: unknown tensor op '" + n + "'");
+        if (it == T.end())
+            throw std::runtime_error("IRBuilder: unknown tensor op '" + n + "'");
         return it->second;
     }
  
     static bool op_is_void(TensorOpCode op) {
-        return op == TensorOpCode::Backward || op == TensorOpCode::ZeroGrad || op == TensorOpCode::NoGrad;
-    }
- 
-    std::string fresh_label(const std::string& base) {
-        auto it = name_counts_.find(base);
-        if (it == name_counts_.end()) { name_counts_[base] = 1; return base; }
-        return base + std::to_string(it->second++);
-    }
- 
-    std::shared_ptr<Value> make_const_lit(const ASTNode& node) {
-        if (auto* e = dynamic_cast<const LitIntExpr*>(&node))   return std::make_shared<ConstantInt>(e->value, e->resolved_type);
-        if (auto* e = dynamic_cast<const LitFloatExpr*>(&node)) return std::make_shared<ConstantFloat>(e->value, e->resolved_type);
-        if (auto* e = dynamic_cast<const LitBoolExpr*>(&node))  return std::make_shared<ConstantBool>(e->value);
-        if (auto* e = dynamic_cast<const LitStrExpr*>(&node))   return std::make_shared<ConstantString>(e->value);
-        throw std::runtime_error("IRBuilder: global let must be a literal");
+        return op == TensorOpCode::Backward ||
+               op == TensorOpCode::ZeroGrad ||
+               op == TensorOpCode::NoGrad;
     }
 };
  
