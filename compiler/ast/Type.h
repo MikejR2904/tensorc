@@ -160,6 +160,10 @@ struct Type
                kind == Kind::F32 || kind == Kind::F64;
     }
 
+    bool is_float() const {
+        return kind == Kind::F32 || kind == Kind::F64;
+    }
+
     bool is_bool() const { return kind == Kind::Bool; }
 
     bool is_collection() const {

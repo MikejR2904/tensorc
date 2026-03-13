@@ -57,8 +57,8 @@
 #include <vector>
 #include <string>
 #include <functional>
-#include "ASTNode.h"
-#include "SemanticAnalyzer.h"
+#include "../compiler/ast/ASTNode.h"
+#include "../compiler/ast/SemanticAnalyzer.h"
 
 // Helper to create a dummy position
 Position dpos() { return {1, 1}; }

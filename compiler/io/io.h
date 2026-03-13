@@ -4,3 +4,4 @@
 #include "error.h"
 #include "cache.h"
 #include "builtins.h"
+#include "ImportResolver.h"

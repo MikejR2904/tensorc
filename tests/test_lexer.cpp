@@ -2,7 +2,7 @@
 #include <iomanip>
 #include <vector>
 #include <string>
-#include "Lexer.h"
+#include "../compiler/lexer/Lexer.h"
 
 // Helper function to turn TokenKind enum into a readable string
 std::string kindToString(TokenKind k) {

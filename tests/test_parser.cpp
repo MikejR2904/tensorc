@@ -4,9 +4,9 @@
 #include <sstream>
 #include <fstream>
 #include <vector>
-#include "../lexer/Lexer.h"
-#include "Parser.h"
-#include "../ast/ASTNode.h"
+#include "../compiler/lexer/Lexer.h"
+#include "../compiler/parser/Parser.h"
+#include "../compiler/ast/ASTNode.h"
 
 // ─────────────────────────────────────────────
 //  ANSI colours
