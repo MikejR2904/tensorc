@@ -135,6 +135,9 @@ struct IRModule
     Function* add_function(std::string name, TypePtr fn_type,
                            bool is_async = false)
     {
+        for (auto& fn : functions) {
+            if (fn->name == name) return fn.get();
+        }
         auto fn = std::make_shared<Function>(std::move(name), std::move(fn_type));
         fn->is_async = is_async;
         fn->parent_module = this;
