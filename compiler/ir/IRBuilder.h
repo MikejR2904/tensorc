@@ -163,7 +163,20 @@ public:
     template<typename T, typename... Args>
     T* emit(Args&&... args) {
         if (!bb_) throw std::logic_error("IRBuilder: no active block");
-        return bb_->emit<T>(std::forward<Args>(args)...);
+        T* inst = bb_->emit<T>(std::forward<Args>(args)...);
+        if (inst && inst->type) {
+            bool is_tensor_infer = (inst->type->kind == Type::Kind::Tensor && 
+                                    inst->type->elem_type()->is_infer());
+            if (inst->type->is_infer() || is_tensor_infer) {
+                std::cerr << "[DEBUG] Unresolved type in IR emission!\n"
+                        << "  Instruction: " << inst->name << "\n"
+                        << "  Detected Type: " << inst->type->str() << "\n";
+                // Helpful if you have a way to dump the current function/block
+                // std::cerr << "  Context: " << bb_->name << std::endl;
+            }
+        }
+        
+        return inst;
     }
  
     // ── Public lowering ───────────────────────────────────────────────────────
@@ -619,7 +632,36 @@ private:
         TensorOpCode op = resolve_tensor_op(scope_callee.kind.member);
         std::vector<ValuePtr> args;
         for (auto& a : ast_args) args.push_back(vp(lower_expr(*a)));
-        return emit<TensorOpInst>(op_is_void(op) ? "" : fresh(), ret_type, op, std::move(args));
+        TypePtr effective_ty = ret_type;
+        if (effective_ty->is_infer() || effective_ty->elem_type()->is_infer()) {
+            // Default: try to copy element type from first good tensor arg
+            TypePtr elem_ty = Type::f32();  // safe fallback
+
+            for (const auto& arg : args) {
+                if (arg->type && arg->type->kind == Type::Kind::Tensor) {
+                    TypePtr el = arg->type->elem_type();
+                    if (el && !el->is_infer()) {
+                        elem_ty = el;
+                        break;
+                    }
+                }
+            }
+
+            // Most tensor ops preserve tensor + element type
+            effective_ty = Type::tensor(elem_ty);
+
+            // Special case: matmul (still tensor)
+            if (op == TensorOpCode::MatMul) {
+                // could add shape inference later, for now just ensure tensor<f32>
+                effective_ty = Type::tensor(elem_ty);
+            }
+        }
+        // For ops known to return scalar (reduce-to-number)
+        if (op == TensorOpCode::Sum || op == TensorOpCode::Mean || op == TensorOpCode::Max ||
+            op == TensorOpCode::Min || op == TensorOpCode::Prod) {
+            effective_ty = Type::f32();
+        }
+        return emit<TensorOpInst>(op_is_void(op) ? "" : fresh(), effective_ty, op, std::move(args));
     }
 
     Value* lower_std_call(const std::string& func_name, const std::vector<ExprPtr>& args, TypePtr ret) {
