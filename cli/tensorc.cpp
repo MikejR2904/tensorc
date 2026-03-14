@@ -90,6 +90,7 @@ int main(int argc, char** argv)
         auto module = std::make_unique<ir::IRModule>(filepath);
         builder.build(program, module.get());
 
+        int fusions = ir::PassPipeline::run(*module);
  
         auto t1 = std::chrono::high_resolution_clock::now();
         std::chrono::duration<double, std::milli> ms = t1 - t0;

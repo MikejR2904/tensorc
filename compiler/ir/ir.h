@@ -5,4 +5,5 @@
 #include "IRModule.h"
 #include "IRPrinter.h"
 #include "IRBuilder.h"
+#include "IRPasses.h"
  
