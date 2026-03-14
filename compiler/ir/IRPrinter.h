@@ -114,7 +114,9 @@ private:
         // Global constants / let bindings
         for (auto& g : mod.globals)
         {
-            out_ << "@" << g->name << " = ";
+            const std::string& gname = g->name;
+            out_ << ((!gname.empty() && gname[0] == '@') ? gname : "@" + gname);
+            out_ << " = ";
             emit_constant_value(*g);
             out_ << "  ; " << type_str(g->type) << "\n";
         }
@@ -124,7 +126,9 @@ private:
         // Functions (separated by blank lines)
         for (size_t i = 0; i < mod.functions.size(); ++i)
         {
-            emit_function(*mod.functions[i]);
+            const auto& fn = *mod.functions[i];
+            if (fn.blocks.empty()) continue;
+            emit_function(fn);
             if (i + 1 < mod.functions.size()) out_ << "\n";
         }
     }
@@ -263,7 +267,19 @@ private:
         std::string s;
         if (!i.name.empty()) s = i.name + " = ";
         if (i.is_tail) s += "tail ";
-        s += "call " + val(i.callee) + "(";
+        s += "call ";
+        if (auto* fn = dynamic_cast<ir::Function*>(i.callee.get())) {
+            const std::string& fname = fn->name;
+            // Only prepend @ if it's missing
+            if (!fname.empty() && fname[0] == '@') {
+                s += fname;
+            } else {
+                s += "@" + fname;
+            }
+        } else {
+            s += val(i.callee);
+        }
+        s += "(";
         for (size_t a = 0; a < i.args.size(); ++a)
         {
             s += val(i.args[a]);
@@ -388,14 +404,10 @@ private:
         }
     }
  
-    // ── Operand name helper ───────────────────────────────────────────────────
- 
-    /// Returns the printable name of a value operand.
-    /// Constants are printed inline; everything else uses its SSA name.
     std::string val(const ValuePtr& v) const
     {
         if (!v) return "<null>";
- 
+
         // Inline small constants instead of a separate definition
         if (auto* c = dynamic_cast<const ConstantInt*>(v.get()))
             return std::to_string(c->value);
@@ -409,7 +421,10 @@ private:
             return c->value ? "true" : "false";
         if (auto* c = dynamic_cast<const ConstantString*>(v.get()))
             return "\"" + c->value + "\"";
- 
+        if (auto* fn = dynamic_cast<const ir::Function*>(v.get())) {
+            if (!fn->name.empty() && fn->name[0] == '@') return fn->name;
+            return "@" + fn->name;
+        }
         // Named value (SSA register, function, argument)
         return v->name;
     }

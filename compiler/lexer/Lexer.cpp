@@ -311,7 +311,7 @@ Token Lexer::lexOperator()
                 return makeToken(TokenKind::RANGE, "..", start);
             }
             return makeToken(TokenKind::DOT, ".", start);
-        // generic sigilh
+        // generic sigil
         case '#':
             return makeToken(TokenKind::HASH, "#", start);
         // brackets

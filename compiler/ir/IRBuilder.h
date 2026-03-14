@@ -84,9 +84,10 @@ public:
         auto& func = s.kind.func.value();
         std::string fn_name = func.ident.name();
         TypePtr ret_ty = lower_type(func.ident);
-        mod_->add_function(fn_name, ret_ty, false);
-
-        ir::Function* func_ptr = mod_->add_function(fn_name, ret_ty, false);
+        std::vector<TypePtr> ptypes;
+        for (auto& p : func.params) ptypes.push_back(lower_type(p));
+        TypePtr fn_sig_type = Type::fn(ptypes, ret_ty);
+        ir::Function* func_ptr = mod_->add_function(fn_name, fn_sig_type, false);
         global_functions[fn_name] = func_ptr;
         if (!func_ptr) return;
 
@@ -220,9 +221,12 @@ public:
         case StmtKind::Tag::Spawn:
             if (s.kind.spawn_fn) lower_stmt(*s.kind.spawn_fn);
             return nullptr;
+        case StmtKind::Tag::Else: {
+            lower_compound(s.kind.else_body);
+            return nullptr;
+        }
         case StmtKind::Tag::Import:   // handled by ImportResolver
         case StmtKind::Tag::Struct:   // type declaration, no IR
-        case StmtKind::Tag::Else:     // only valid inside If chain
         default:
             return nullptr;
         }
@@ -288,12 +292,16 @@ private:
     }
  
     void lower_func(const Func& f) {
+        std::cout << "Function " << f.ident.name() << " ty_kind: " 
+              << (int)f.ident.ty_kind() << std::endl;
         std::vector<TypePtr> ptypes;
         for (auto& p : f.params) ptypes.push_back(ty(p.ty_kind()));
         TypePtr ret_ty  = ty(f.ident.ty_kind());
         TypePtr fn_type = Type::fn(ptypes, ret_ty);
- 
-        Function* fn = mod_->add_function("@" + f.ident.name(), fn_type, f.is_async);
+
+        const std::string& raw = f.ident.name();
+        std::string fn_name = (raw.empty() || raw[0] != '@') ? "@" + raw : raw;
+        Function* fn = mod_->add_function(fn_name, fn_type, f.is_async);
         global_functions[f.ident.name()] = fn;
         set_function(fn); push_scope();
         set_block(fn->create_entry());
@@ -311,7 +319,8 @@ private:
         if (!s.kind.let_expr) return;
         auto cv = make_const_from_expr(*s.kind.let_expr);
         if (!cv) return;
-        cv->name = "@" + s.kind.let_ident.name();
+        const std::string& raw = s.kind.let_ident.name();
+        cv->name = (raw.empty() || raw[0] != '@') ? "@" + raw : raw;
         ir::Value* global_ptr = cv.get();
         mod_->add_global(std::move(cv));
         define(s.kind.let_ident.name(), global_ptr);
@@ -350,7 +359,8 @@ private:
         Value* cond     = lower_expr(*s.kind.if_cond);
         auto* then_bb   = fn_->add_block(fresh_label("if.true"));
         auto* merge_bb  = fn_->add_block(fresh_label("if.merge"));
-        auto* else_bb   = s.kind.else_or_else_if
+        bool has_else = s.kind.else_or_else_if || !s.kind.else_body.stmts.empty();
+        auto* else_bb   = has_else
                         ? fn_->add_block(fresh_label("if.false"))
                         : nullptr;
  
@@ -360,9 +370,13 @@ private:
         lower_compound(s.kind.if_body);
         if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
  
-        if (else_bb && s.kind.else_or_else_if) {
+        if (else_bb) {
             set_block(else_bb);
-            lower_stmt(*s.kind.else_or_else_if);
+            if (s.kind.else_or_else_if) {
+                lower_stmt(*s.kind.else_or_else_if);
+            } else {
+                lower_compound(s.kind.else_body);
+            }
             if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
         }
         set_block(merge_bb);
@@ -462,6 +476,10 @@ private:
     Value* lower_id(const Expr& e) {
         const std::string& name = e.kind.id.name();
         Value* v = lookup(name);
+        if (!v && mod_) {
+            std::string fn_name = (name.empty() || name[0] != '@') ? "@" + name : name;
+            v = mod_->find_function(fn_name);
+        }
         if (!v) throw std::runtime_error("IRBuilder: undefined name '" + name + "'");
         if (dynamic_cast<AllocaInst*>(v))
             return emit<LoadInst>(fresh(name), v->type, vp(v));
@@ -501,7 +519,12 @@ private:
         case BinOp::Or:  op = BinOpCode::Or;  break;
         default: throw std::runtime_error("IRBuilder: unhandled BinOp");
         }
-        return emit<BinOpInst>(fresh(), ty_, op, vp(lhs), vp(rhs));
+        TypePtr res_ty = lhs->type; 
+        if (res_ty->kind == Type::Kind::Tensor) {
+            auto elem = res_ty->elem_type();
+            if (!elem || elem->is_infer()) res_ty = rhs->type; // Fallback to right side
+        }
+        return emit<BinOpInst>(fresh(), res_ty, op, vp(lhs), vp(rhs));
     }
  
     Value* lower_unary(const Expr& e) {
@@ -641,7 +664,7 @@ private:
  
     Value* lower_spawn(const Expr& e) {
         Value* task = lower_expr(*e.kind.spawned_expr);
-        return emit<SpawnInst>(fresh("h"), Type::infer(), vp(task));
+        return emit<SpawnInst>(fresh("h"), task->type, vp(task));
     }
  
     Value* lower_await(const Expr& e) {
@@ -649,7 +672,8 @@ private:
             throw std::runtime_error("IRBuilder Error: 'await' expression is missing its target operand.");
         }
         Value* handle = lower_expr(*e.kind.operand);
-        return emit<AwaitInst>(fresh("await_tmp"), expr_type(e), vp(handle));
+        TypePtr awaited_ty = handle->type;
+        return emit<AwaitInst>(fresh("await_tmp"), awaited_ty, vp(handle));
     }
  
     Value* lower_grad(const Expr& e) {
