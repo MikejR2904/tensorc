@@ -243,6 +243,57 @@ private:
         std::string s;
         if (!i.name.empty()) s = i.name + " = ";
         s += "tensor." + tensor_op_str(i.op) + " ";
+        // For FusedElemChain, print: args followed by a { body } region
+        // so the backend (and humans) can see exactly what math runs in the loop.
+        // Format:
+        //   %out = tensor.fused.elem_chain %x, %scale, %bias, 1.0, %mask {
+        //     v0=ext[0], v1=ext[1], ...   ; external inputs legend
+        //     v2 = elem.mul v0, v1
+        //     v3 = elem.add v2, v2
+        //     ...
+        //     yield v<last>
+        //   }  ; Tensor<f32>
+        if (i.op == TensorOpCode::FusedElemChain && !i.elem_body.empty()) {
+            // Print external args
+            for (size_t a = 0; a < i.args.size(); ++a) {
+                s += val(i.args[a]);
+                if (a + 1 < i.args.size()) s += ", ";
+            }
+            s += " {";
+            line(s);
+            push();
+ 
+            // Print value legend: ext[0] = %x, etc.
+            std::string legend = "; ext: ";
+            for (size_t a = 0; a < i.args.size(); ++a) {
+                legend += "v" + std::to_string(a) + "=" + val(i.args[a]);
+                if (a + 1 < i.args.size()) legend += ", ";
+            }
+            line(legend);
+ 
+            // Print each node in the body
+            size_t n_ext = i.args.size();
+            for (size_t k = 0; k < i.elem_body.size(); ++k) {
+                const auto& node = i.elem_body[k];
+                std::string node_s = "v" + std::to_string(n_ext + k) + " = "
+                                   + tensor_op_str(node.op) + " ";
+                for (size_t a = 0; a < node.inputs.size(); ++a) {
+                    node_s += "v" + std::to_string(node.inputs[a]);
+                    if (a + 1 < node.inputs.size()) node_s += ", ";
+                }
+                line(node_s);
+            }
+            // Yield the last node's result
+            if (!i.elem_body.empty())
+                line("yield v" + std::to_string(n_ext + i.elem_body.size() - 1));
+ 
+            pop();
+            std::string close = "}";
+            close += type_comment(i.type);
+            line(close);
+            return;
+        }
+
         for (size_t a = 0; a < i.args.size(); ++a)
         {
             s += val(i.args[a]);
@@ -555,11 +606,17 @@ private:
             case TensorOpCode::Detach:    return "detach";
             case TensorOpCode::ZeroGrad:  return "zero_grad";
             case TensorOpCode::RequiresGrad: return "requires_grad";
+            // Element-wise tensor arithmetic (produced by lower_binary for tensor operands)
+            case TensorOpCode::ElemAdd: return "elem.add";
+            case TensorOpCode::ElemSub: return "elem.sub";
+            case TensorOpCode::ElemMul: return "elem.mul";
+            case TensorOpCode::ElemDiv: return "elem.div";
             // Fused kernels; produced by FusionPass, never by the front-end
             case TensorOpCode::FusedMatMulRelu: return "fused.matmul_relu";
             case TensorOpCode::FusedMatMulGelu: return "fused.matmul_gelu";
             case TensorOpCode::FusedMatMulSilu: return "fused.matmul_silu";
             case TensorOpCode::FusedMatMulTanh: return "fused.matmul_tanh";
+            case TensorOpCode::FusedElemChain:   return "fused.elem_chain";
         }
         return "?";
     }

@@ -109,7 +109,7 @@ enum class TensorOpCode {
     // Autodiff
     Backward, Grad, NoGrad, Detach, ZeroGrad, RequiresGrad,
     // Fused kernels
-    FusedMatMulRelu, FusedMatMulGelu, FusedMatMulSilu, FusedMatMulTanh,
+    FusedMatMulRelu, FusedMatMulGelu, FusedMatMulSilu, FusedMatMulTanh, FusedElemChain,
 };
  
 /// True for opcodes that were created by FusionPass and map to a single fused kernel.  The backend uses this to route to the correct dispatch path.
@@ -119,6 +119,7 @@ inline bool is_fused_opcode(TensorOpCode op) {
     case TensorOpCode::FusedMatMulGelu:
     case TensorOpCode::FusedMatMulSilu:
     case TensorOpCode::FusedMatMulTanh:
+    case TensorOpCode::FusedElemChain:
         return true;
     default:
         return false;
@@ -272,6 +273,12 @@ struct TensorOpInst : Instruction
     std::optional<std::vector<int64_t>> inferred_shape;
     // Set by the autodiff pass; true if this op is on the grad-required path.
     bool requires_grad = false;
+    struct ElemNode {
+        TensorOpCode op;
+        std::vector<size_t> inputs;
+    };
+    std::vector<ElemNode> elem_body; 
+    std::vector<TensorOpCode> chain_ops; // For fused element-wise chains, the list of ops in the chain (e.g. [Relu, Exp, Log] for a chain of .relu().exp().log())
  
     TensorOpInst(std::string name, TypePtr type, TensorOpCode op, std::vector<ValuePtr> args)
         : Instruction(std::move(name), std::move(type)), op(op), args(std::move(args)) { track_uses(this->args); }

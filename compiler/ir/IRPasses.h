@@ -26,6 +26,7 @@
  
 #include "IRModule.h"
 #include <unordered_set>
+#include <unordered_map>
 #include <functional>
 #include <algorithm>
 #include <vector>
@@ -182,6 +183,12 @@ private:
         case TensorOpCode::Pad:
         case TensorOpCode::Detach: case TensorOpCode::NoGrad:
         case TensorOpCode::Reshape: case TensorOpCode::View:
+        // Element-wise tensor arithmetic: result type == tensor type of the
+        // tensor operand (the scalar operand is broadcast by the backend).
+        case TensorOpCode::ElemAdd: case TensorOpCode::ElemSub:
+        case TensorOpCode::ElemMul: case TensorOpCode::ElemDiv:
+        // FusedElemChain inherits the type of the first input tensor.
+        case TensorOpCode::FusedElemChain:
             if (first && !is_infer(first)) i.type = first;
             break;
         // Linear algebra: output == first arg type
@@ -408,43 +415,174 @@ private:
         }
     }
  
+    // True for any purely element-wise op safe to fuse in a chain.
+    static bool is_elem_wise(TensorOpCode op) {
+        switch (op) {
+        case TensorOpCode::ElemAdd: case TensorOpCode::ElemSub:
+        case TensorOpCode::ElemMul: case TensorOpCode::ElemDiv:
+        case TensorOpCode::Exp:     case TensorOpCode::Log:
+        case TensorOpCode::Log2:    case TensorOpCode::Log1p:
+        case TensorOpCode::Sqrt:    case TensorOpCode::Rsqrt:
+        case TensorOpCode::Abs:     case TensorOpCode::Neg:
+        case TensorOpCode::Sin:     case TensorOpCode::Cos:
+        case TensorOpCode::Relu:    case TensorOpCode::Relu6:
+        case TensorOpCode::Silu:    case TensorOpCode::Gelu:
+        case TensorOpCode::Sigmoid: case TensorOpCode::Tanh:
+        case TensorOpCode::LeakyRelu: case TensorOpCode::Elu:
+        case TensorOpCode::Clamp:   case TensorOpCode::Pow:
+            return true;
+        default:
+            return false;
+        }
+    }
+
     static int fuse_block(BasicBlock& bb) {
         int count = 0;
         auto& insts = bb.insts;
- 
+
+        // Pass A: MatMul + activation -> FusedMatMulXxx
         for (size_t i = 0; i + 1 < insts.size(); ++i) {
-            // Must be a plain MatMul (not already fused).
             auto* mm = dynamic_cast<TensorOpInst*>(insts[i].get());
             if (!mm || mm->op != TensorOpCode::MatMul) continue;
-            if (is_fused_opcode(mm->op)) continue; // idempotency guard
- 
-            // Next instruction must be a fusible activation.
+            if (is_fused_opcode(mm->op)) continue;
+
             auto* act = dynamic_cast<TensorOpInst*>(insts[i + 1].get());
             if (!act || !is_fusible_activation(act->op)) continue;
- 
-            // Safety check 1: producer-consumer
-            // act's first arg must be exactly the matmul result.
             if (act->args.empty() || act->args[0].get() != mm) continue;
-            // Safety check 2: single use
-            // If the matmul result has any user other than the activation,
-            // fusing would remove the intermediate value that those other
-            // users depend on.  Skip — do not fuse.
             if (mm->use_count() != 1) continue;
- 
-            // Fusion transform
-            // Mutate mm in place: give it the fused opcode and the activation's result type.  mm->args is unchanged; it still holds the original matmul operands; the backend reads them.
-            mm->op = fused_opcode(act->op);
-            mm->type = act->type;  // activation's output type becomes mm's type
- 
-            // Redirect all users of act to mm using the canonical RAUAW utility, which atomically patches use lists on both values.
+
+            mm->op   = fused_opcode(act->op);
+            mm->type = act->type;
             ::ir::replaceAllUsesWith(act, insts[i]);
- 
-            // Remove the now-dead activation instruction.
             insts.erase(insts.begin() + static_cast<ptrdiff_t>(i + 1));
             ++count;
-            // Do not advance i: the next instruction (new i+1) may itself be
-            // a fusible pair with the freshly-fused op (if extended to chains).
         }
+
+        // Pass B: element-wise chain -> FusedElemChain
+        //
+        // Identifies a maximal linear chain of element-wise TensorOpInsts:
+        //   - each op is elem_wise
+        //   - each op's first arg is the result of the immediately preceding op
+        //   - all intermediate results are single-use (consumed only by next op)
+        //     EXCEPT the last node which may have any number of users
+        //
+        // Requires >= 2 ops.
+        //
+        // The fused instruction preserves the full scalar kernel body as a DAG
+        // (TensorOpInst::ElemNode[]) so the backend can codegen a single loop
+        // without losing any math.  The value-table for the DAG is:
+        //   indices 0..n_ext-1           → external inputs in fused_inst.args[]
+        //   indices n_ext+k              → result of elem_body[k]
+        //
+        // This correctly handles shared inputs (e.g. x / (x + 1)) by encoding
+        // each op's actual operand sources as indices into the value table rather
+        // than assuming a flat arg list.
+        for (size_t i = 0; i < insts.size(); ) {
+            auto* first_op = dynamic_cast<TensorOpInst*>(insts[i].get());
+            if (!first_op || is_fused_opcode(first_op->op) || !is_elem_wise(first_op->op)) {
+                ++i; continue;
+            }
+
+            // Extend chain while safety invariants hold
+            size_t j = i;
+            while (j + 1 < insts.size()) {
+                auto* cur  = dynamic_cast<TensorOpInst*>(insts[j].get());
+                auto* next = dynamic_cast<TensorOpInst*>(insts[j + 1].get());
+                if (!next || !is_elem_wise(next->op) || is_fused_opcode(next->op)) break;
+                // next's first arg must be cur's result (producer-consumer)
+                if (next->args.empty() || next->args[0].get() != cur) break;
+                // cur must be single-use — only next consumes it.
+                // (The last op in the chain is allowed multiple users.)
+                if (cur->use_count() != 1) break;
+                ++j;
+            }
+
+            if (j == i) { ++i; continue; } // chain too short
+
+            // Build the value table and DAG body.
+            //
+            // Value table layout:
+            //   slot 0..n_ext-1   = external operands (tensors and scalars in args[])
+            //   slot n_ext+k      = result of elem_body[k]
+            //
+            // We assign a slot to every Value that appears as an operand of any
+            // op in the chain and is NOT itself the result of a chain op.
+            // These become the external inputs (fused_inst.args[]).
+            
+            // Map from Value* -> value-table slot index
+            std::unordered_map<Value*, size_t> val_slot;
+            std::vector<ValuePtr> ext_inputs; // external inputs (args of fused inst)
+
+            // Collect the set of instructions in the chain (for quick membership test)
+            std::vector<TensorOpInst*> chain_insts;
+            for (size_t k = i; k <= j; ++k)
+                chain_insts.push_back(dynamic_cast<TensorOpInst*>(insts[k].get()));
+
+            auto is_chain_result = [&](Value* v) -> bool {
+                for (auto* ci : chain_insts) if (ci == v) return true;
+                return false;
+            };
+
+            // Assign external-input slots for all non-chain operands
+            auto get_ext_slot = [&](Value* v) -> size_t {
+                auto it = val_slot.find(v);
+                if (it != val_slot.end()) return it->second;
+                size_t slot = ext_inputs.size();
+                ext_inputs.push_back(std::shared_ptr<Value>(v, [](Value*){}));
+                val_slot[v] = slot;
+                return slot;
+            };
+
+            // First pass: register all external inputs
+            for (size_t k = i; k <= j; ++k) {
+                auto* op_k = chain_insts[k - i];
+                for (auto& arg : op_k->args) {
+                    if (!is_chain_result(arg.get()))
+                        get_ext_slot(arg.get());
+                }
+            }
+
+            size_t n_ext = ext_inputs.size();
+            // Assign result slots to chain ops (n_ext + position in chain)
+            for (size_t k = i; k <= j; ++k)
+                val_slot[chain_insts[k - i]] = n_ext + (k - i);
+
+            // Second pass: build the ElemNode DAG
+            std::vector<TensorOpInst::ElemNode> body;
+            for (size_t k = i; k <= j; ++k) {
+                auto* op_k = chain_insts[k - i];
+                TensorOpInst::ElemNode node;
+                node.op = op_k->op;
+                for (auto& arg : op_k->args) {
+                    auto it = val_slot.find(arg.get());
+                    assert(it != val_slot.end() && "arg not in value table");
+                    node.inputs.push_back(it->second);
+                }
+                body.push_back(std::move(node));
+            }
+
+            // Mutate first_op into the FusedElemChain instruction.
+            // External inputs go in args[]; the scalar body goes in elem_body[].
+            auto* last_op = dynamic_cast<TensorOpInst*>(insts[j].get());
+
+            // Fix up use lists: remove old args, add new ones
+            for (auto& old_arg : first_op->args) old_arg->remove_use(first_op);
+            first_op->op        = TensorOpCode::FusedElemChain;
+            first_op->type      = last_op->type;
+            first_op->args      = std::move(ext_inputs);
+            first_op->elem_body = std::move(body);
+            for (auto& new_arg : first_op->args) new_arg->add_use(first_op);
+
+            // Redirect all users of last_op to the fused instruction
+            ::ir::replaceAllUsesWith(last_op, insts[i]);
+
+            // Erase chain members i+1..j
+            insts.erase(insts.begin() + static_cast<ptrdiff_t>(i + 1),
+                        insts.begin() + static_cast<ptrdiff_t>(j + 1));
+            ++count;
+            ++i;
+        }
+
         return count;
     }
 private:

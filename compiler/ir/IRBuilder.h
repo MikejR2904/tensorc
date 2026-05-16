@@ -109,7 +109,7 @@ public:
         std::vector<TypePtr> ptypes;
         for (auto& p : func.params) ptypes.push_back(lower_type(p));
         TypePtr fn_sig_type = Type::fn(ptypes, ret_ty);
-        ir::Function* func_ptr = mod_->add_function(fn_name, fn_sig_type, false);
+        ir::Function* func_ptr = mod_->add_function(fn_name, fn_sig_type, func.is_async);
         global_functions[raw] = func_ptr;
         global_functions[fn_name] = func_ptr;
         if (!func_ptr) return;
@@ -565,10 +565,58 @@ private:
         }
         default: break;
         }
-        // Arithmetic / logical → BinOpInst
+        // MatMul (@) → always TensorOpInst::MatMul
+        if (e.kind.bin_op == BinOp::MatMul) {
+            auto l=lower_expr(*e.kind.lhs), r=lower_expr(*e.kind.rhs);
+            TypePtr matmul_ty = ty_;
+            if (!matmul_ty || matmul_ty->is_infer()) {
+                if (l->type && l->type->kind == Type::Kind::Tensor &&
+                    l->type->elem_type() && !l->type->elem_type()->is_infer())
+                    matmul_ty = l->type;
+                else if (r->type && r->type->kind == Type::Kind::Tensor &&
+                         r->type->elem_type() && !r->type->elem_type()->is_infer())
+                    matmul_ty = r->type;
+                else
+                    matmul_ty = Type::tensor(Type::f32());
+            }
+            return emit<TensorOpInst>(fresh(), matmul_ty, TensorOpCode::MatMul,
+                                      std::vector<ValuePtr>{vp(l),vp(r)});
+        }
+ 
+        // All remaining arithmetic / logical ops
         Value* lhs = lower_expr(*e.kind.lhs);
         Value* rhs = lower_expr(*e.kind.rhs);
-        bool f = ty_ && ty_->is_float();
+ 
+        // Resolve result type: prefer sema annotation, fall back to operand types
+        TypePtr res_ty = ty_;
+        if (!res_ty || res_ty->is_infer()) res_ty = lhs->type;
+        if (!res_ty || res_ty->is_infer()) res_ty = rhs->type;
+        if (!res_ty) res_ty = Type::infer();
+ 
+        // KEY FIX: If either operand is a Tensor, emit TensorOpInst(ElemXxx).
+        // BinOpInst is only correct for scalar arithmetic.  Tensor element-wise
+        // ops must be TensorOpInst so:
+        //   1. The backend dispatches to a vectorised/broadcast kernel, not a scalar ALU op.
+        //   2. FusionPass can see the full element-wise chain and fuse it.
+        bool lhs_is_tensor = lhs->type && lhs->type->kind == Type::Kind::Tensor;
+        bool rhs_is_tensor = rhs->type && rhs->type->kind == Type::Kind::Tensor;
+        if (lhs_is_tensor || rhs_is_tensor) {
+            // Result type is always the tensor type; scalar side is broadcast by the backend.
+            TypePtr tensor_ty = lhs_is_tensor ? lhs->type : rhs->type;
+            TensorOpCode elem_op;
+            switch (e.kind.bin_op) {
+            case BinOp::Add: elem_op = TensorOpCode::ElemAdd; break;
+            case BinOp::Sub: elem_op = TensorOpCode::ElemSub; break;
+            case BinOp::Mul: elem_op = TensorOpCode::ElemMul; break;
+            case BinOp::Div: elem_op = TensorOpCode::ElemDiv; break;
+            default:
+                throw std::runtime_error("IRBuilder: unsupported binary op on Tensor operands");
+            }
+            return emit<TensorOpInst>(fresh(), tensor_ty, elem_op, std::vector<ValuePtr>{vp(lhs), vp(rhs)});
+        }
+ 
+        // Scalar arithmetic → BinOpInst
+        bool f = res_ty && (res_ty->kind == Type::Kind::F32 || res_ty->kind == Type::Kind::F64);
         BinOpCode op;
         switch (e.kind.bin_op) {
         case BinOp::Add: op = f ? BinOpCode::FAdd : BinOpCode::Add; break;
@@ -578,11 +626,6 @@ private:
         case BinOp::And: op = BinOpCode::And; break;
         case BinOp::Or:  op = BinOpCode::Or;  break;
         default: throw std::runtime_error("IRBuilder: unhandled BinOp");
-        }
-        TypePtr res_ty = lhs->type; 
-        if (res_ty->kind == Type::Kind::Tensor) {
-            auto elem = res_ty->elem_type();
-            if (!elem || elem->is_infer()) res_ty = rhs->type; // Fallback to right side
         }
         return emit<BinOpInst>(fresh(), res_ty, op, vp(lhs), vp(rhs));
     }
@@ -604,16 +647,34 @@ private:
             Value* cur = lower_expr(*e.kind.lhs);
             Value* rhs = lower_expr(*e.kind.rhs);
             TypePtr ty_ = expr_type(e);
-            bool f = ty_ && ty_->is_float();
-            BinOpCode op;
-            switch (e.kind.bin_op) {
-            case BinOp::AddAssign: op = f ? BinOpCode::FAdd : BinOpCode::Add; break;
-            case BinOp::SubAssign: op = f ? BinOpCode::FSub : BinOpCode::Sub; break;
-            case BinOp::MulAssign: op = f ? BinOpCode::FMul : BinOpCode::Mul; break;
-            case BinOp::DivAssign: op = f ? BinOpCode::FDiv : BinOpCode::Div; break;
-            default: throw std::runtime_error("IRBuilder: unknown compound assign");
+            if (!ty_ || ty_->is_infer()) ty_ = cur->type;
+            if (!ty_ || ty_->is_infer()) ty_ = rhs->type;
+            // If either side is a tensor, use TensorOpInst(ElemXxx) — same rule as lower_binary.
+            bool lhs_tensor = cur->type && cur->type->kind == Type::Kind::Tensor;
+            bool rhs_tensor = rhs->type && rhs->type->kind == Type::Kind::Tensor;
+            if (lhs_tensor || rhs_tensor) {
+                TypePtr tensor_ty = lhs_tensor ? cur->type : rhs->type;
+                TensorOpCode elem_op;
+                switch (e.kind.bin_op) {
+                case BinOp::AddAssign: elem_op = TensorOpCode::ElemAdd; break;
+                case BinOp::SubAssign: elem_op = TensorOpCode::ElemSub; break;
+                case BinOp::MulAssign: elem_op = TensorOpCode::ElemMul; break;
+                case BinOp::DivAssign: elem_op = TensorOpCode::ElemDiv; break;
+                default: throw std::runtime_error("IRBuilder: unknown compound assign on tensor");
+                }
+                rhs_val = emit<TensorOpInst>(fresh(), tensor_ty, elem_op, std::vector<ValuePtr>{vp(cur), vp(rhs)});
+            } else {
+                bool f = ty_ && (ty_->kind == Type::Kind::F32 || ty_->kind == Type::Kind::F64);
+                BinOpCode op;
+                switch (e.kind.bin_op) {
+                case BinOp::AddAssign: op = f ? BinOpCode::FAdd : BinOpCode::Add; break;
+                case BinOp::SubAssign: op = f ? BinOpCode::FSub : BinOpCode::Sub; break;
+                case BinOp::MulAssign: op = f ? BinOpCode::FMul : BinOpCode::Mul; break;
+                case BinOp::DivAssign: op = f ? BinOpCode::FDiv : BinOpCode::Div; break;
+                default: throw std::runtime_error("IRBuilder: unknown compound assign");
+                }
+                rhs_val = emit<BinOpInst>(fresh(), ty_, op, vp(cur), vp(rhs));
             }
-            rhs_val = emit<BinOpInst>(fresh(), ty_, op, vp(cur), vp(rhs));
         }
         store_to_lvalue(*e.kind.lhs, rhs_val);
         return rhs_val;
@@ -687,26 +748,22 @@ private:
         TensorOpCode op = resolve_tensor_op(scope_callee.kind.member);
         std::vector<ValuePtr> args;
         for (auto& a : ast_args) args.push_back(vp(lower_expr(*a)));
+        // Resolve result type safely: prefer sema annotation, fall back to first
+        // well-typed tensor arg's type, then default to Tensor<f32>.
+        // Guards against null elem_type() which causes a crash in the old code.
         TypePtr effective_ty = ret_type;
-        if (!effective_ty || effective_ty->is_infer() || (effective_ty->kind == Type::Kind::Tensor && (!effective_ty->elem_type() || effective_ty->elem_type()->is_infer()))) {
-            // Default: try to copy element type from first good tensor arg
+        bool needs_resolve = !effective_ty || effective_ty->is_infer() ||
+            (effective_ty->kind == Type::Kind::Tensor && (!effective_ty->elem_type() || effective_ty->elem_type()->is_infer()));
+        if (needs_resolve) {
             TypePtr elem_ty = Type::f32();
             for (const auto& arg : args) {
-                if (arg->type && arg->type->kind == Type::Kind::Tensor) {
+                if (!arg || !arg->type) continue;
+                if (arg->type->kind == Type::Kind::Tensor) {
                     TypePtr el = arg->type->elem_type();
-                    if (el && !el->is_infer()) {
-                        elem_ty = el;
-                        break;
-                    }
+                    if (el && !el->is_infer()) { elem_ty = el; break; }
                 }
             }
-            // Most tensor ops preserve tensor + element type
             effective_ty = Type::tensor(elem_ty);
-            // Special case: matmul (still tensor)
-            if (op == TensorOpCode::MatMul) {
-                // could add shape inference later, for now just ensure tensor<f32>
-                effective_ty = Type::tensor(elem_ty);
-            }
         }
         // For ops known to return scalar (reduce-to-number)
         if (op == TensorOpCode::Sum || op == TensorOpCode::Mean || op == TensorOpCode::Max ||
@@ -763,8 +820,39 @@ private:
     }
  
     Value* lower_spawn(const Expr& e) {
+        // If spawning a direct call to an async fn, lower the call args and
+        // emit a SpawnInst whose task is the callee function value (not its
+        // return value). This prevents the double-wrap:
+        //   WRONG:  %r = call @async_fn(...)  then  %h = spawn %r
+        //   RIGHT:  %h = spawn @async_fn(...)  — the runtime schedules it
+        //
+        // We detect this by checking if the spawned expression is a Call whose
+        // callee resolves to an async Function in the module.
+        if (e.kind.spawned_expr && e.kind.spawned_expr->kind.tag == ExprKind::Tag::Call)
+        {
+            const Expr& call_e = *e.kind.spawned_expr;
+            const Expr& callee_e = *call_e.kind.callee;
+            std::string callee_name = (callee_e.kind.tag == ExprKind::Tag::Id) ? callee_e.kind.id.name() : "";
+            Function* async_fn = nullptr;
+            if (!callee_name.empty()) {
+                auto it = global_functions.find(callee_name);
+                if (it != global_functions.end()) async_fn = it->second;
+            }
+            if (async_fn && async_fn->is_async) {
+                // Lower arguments only — do NOT call the function
+                std::vector<ValuePtr> args;
+                for (auto& a : call_e.kind.args) args.push_back(vp(lower_expr(*a)));
+                TypePtr ret_ty = async_fn->type && async_fn->type->ret_type() ? async_fn->type->ret_type() : Type::infer();
+                // Build a small CallInst that represents "schedule this call"
+                // then hand it to SpawnInst as the task value.
+                // The spawned task value IS the call; the handle has the return type.
+                Value* call_val = emit<CallInst>(fresh(), ret_ty, vp(async_fn), std::move(args));
+                return emit<SpawnInst>(fresh("task"), ret_ty, vp(call_val));
+            }
+        }
+        // Fallback: spawning a closure / fn-value directly
         Value* task = lower_expr(*e.kind.spawned_expr);
-        return emit<SpawnInst>(fresh("h"), task->type, vp(task));
+        return emit<SpawnInst>(fresh("task"), task->type, vp(task));
     }
  
     Value* lower_await(const Expr& e) {
