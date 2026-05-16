@@ -1,10 +1,9 @@
 #pragma once
- 
-/// ir/IRBuilder.h  — AST structs fully defined before IRBuilder uses them.
- 
+  
 #include "IRModule.h"
 #include "IRPrinter.h"
 #include "../ast/ASTNode.h"
+#include "../io/builtins.h"
  
 #include <memory>
 #include <stdexcept>
@@ -21,18 +20,19 @@ class IRBuilder
 public:
     IRBuilder() = default;
  
-    // ── Entry point ───────────────────────────────────────────────────────────
-    void build(const Program& prog, IRModule* mod)
+    // Main entry to build IR from an AST program
+    void build(const Program& prog, IRModule* mod, const io::BuiltinRegistry& builtins)
     {
         this->mod_ = mod;
-        // for (auto& s : prog.stmts) {
-        //     if (s) lower_top_level(*s);
-        // }
+        // Register all builtin symbols in the global scope
+        register_builtins(builtins);
+        // Register all user-defined struct types so IR can resolve Named types consistently.
+        register_named_types(prog);
+        // Pass 1: Register all function prototypes so we can call them recursively in the next pass
         for (auto& stmt : prog.stmts) {
             if (stmt->kind.tag == StmtKind::Tag::Let) {
                 lower_top_level(*stmt);
             } 
-            
             if (stmt->kind.tag == StmtKind::Tag::Func && stmt->kind.func.has_value()) {
                 auto& func = stmt->kind.func.value();
                 // Peek inside the function body for Let statements to hoist
@@ -54,7 +54,7 @@ public:
                         }
                     }
                 }
-                // 1b. Harvest nested 'let' from body (e.g. inside main)
+                // Harvest nested 'let' from body (e.g. inside main)
                 for (auto& body_stmt : func.body.stmts) {
                     if (body_stmt->kind.tag == StmtKind::Tag::Let) {
                         lower_top_level(*body_stmt);
@@ -62,13 +62,13 @@ public:
                 }
             }
         }
+        // Pass 2: Lower function bodies now that all prototypes are registered
         for (auto& stmt : prog.stmts) {
             if (stmt->kind.tag == StmtKind::Tag::Func) {
                 register_prototype(*stmt);
             }
         }
-
-        // --- PASS 3: Definition ---
+        // Pass 3: Definition pass to fill in function bodies and global initializers
         for (auto& stmt : prog.stmts) {
             if (stmt->kind.tag == StmtKind::Tag::Func) {
                 lower_func_body(*stmt);
@@ -76,18 +76,41 @@ public:
         }
     }
 
+    TypePtr find_named_type(const std::string& name) const {
+        if (!mod_) return nullptr;
+        if (TypePtr t = mod_->find_type(name)) return t;
+        for (auto* imp : mod_->imports) {
+            if (TypePtr t = imp->find_type(name)) return t;
+        }
+        return nullptr;
+    }
+
     TypePtr lower_type(const Ident& id) {
-        return Type::fromTyKind(id.info.ty_kind);
+        if (id.info.ty_kind == TyKind::UserDef) {
+            if (TypePtr t = find_named_type(id.type_name())) return t;
+        }
+        return Type::fromTyKind(id.info.ty_kind, id.type_name());
+    }
+
+    void register_named_types(const Program& prog) {
+        if (!mod_) return;
+        for (auto& stmt : prog.stmts) {
+            if (stmt->kind.tag == StmtKind::Tag::Struct) {
+                mod_->add_named_type(stmt->kind.struct_name, Type::named(stmt->kind.struct_name));
+            }
+        }
     }
 
     void register_prototype(const Stmt& s) {
         auto& func = s.kind.func.value();
-        std::string fn_name = func.ident.name();
+        const std::string& raw = func.ident.name();
+        std::string fn_name = (raw.empty() || raw[0] != '@') ? "@" + raw : raw;
         TypePtr ret_ty = lower_type(func.ident);
         std::vector<TypePtr> ptypes;
         for (auto& p : func.params) ptypes.push_back(lower_type(p));
         TypePtr fn_sig_type = Type::fn(ptypes, ret_ty);
         ir::Function* func_ptr = mod_->add_function(fn_name, fn_sig_type, false);
+        global_functions[raw] = func_ptr;
         global_functions[fn_name] = func_ptr;
         if (!func_ptr) return;
 
@@ -99,10 +122,10 @@ public:
                 func_ptr->params.push_back(std::move(arg));
             }
         }
+        define(raw, func_ptr);
         define(fn_name, func_ptr);
     }
 
-    // --- lower_func_body: Implementation ---
     void lower_func_body(const Stmt& s) {
         auto& func = s.kind.func.value();
         ir::Function* ir_func = global_functions[func.ident.name()];
@@ -118,28 +141,25 @@ public:
                 define(func.params[i].name(), ir_func->params[i].get());
             }
         }
-
         // Lower actual code
         for (auto& body_stmt : func.body.stmts) {
             lower_stmt(*body_stmt); 
         }
-
         // Cleanup
         this->scopes_.pop_back();
         this->fn_ = nullptr;
         this->bb_ = nullptr;
     }
  
-    // ── Cursor ────────────────────────────────────────────────────────────────
+    // Cursor
     void set_function(Function* fn) { fn_ = fn; }
-    void set_block(BasicBlock* bb)  { bb_ = bb; }
+    void set_block(BasicBlock* bb) { bb_ = bb; }
     BasicBlock* current_block() const { return bb_; }
-    Function*   current_fn()    const { return fn_; }
+    Function* current_fn() const { return fn_; }
  
-    // ── Scope ─────────────────────────────────────────────────────────────────
+    // Scope
     void push_scope() { scopes_.push_back({}); }
-    void pop_scope()  { if (!scopes_.empty()) scopes_.pop_back(); }
- 
+    void pop_scope() { if (!scopes_.empty()) scopes_.pop_back(); }
     void define(const std::string& name, Value* v) {
         if (scopes_.empty()) push_scope();
         scopes_.back()[name] = v;
@@ -151,7 +171,7 @@ public:
         return nullptr;
     }
  
-    // ── SSA names ─────────────────────────────────────────────────────────────
+    // SSA names
     std::string fresh() { return "%" + std::to_string(counter_++); }
     std::string fresh(const std::string& hint) {
         auto it = name_counts_.find(hint);
@@ -159,19 +179,18 @@ public:
         return "%" + hint + std::to_string(it->second++);
     }
  
-    // ── Emit ──────────────────────────────────────────────────────────────────
+    // Emit
     template<typename T, typename... Args>
     T* emit(Args&&... args) {
         if (!bb_) throw std::logic_error("IRBuilder: no active block");
         T* inst = bb_->emit<T>(std::forward<Args>(args)...);
         if (inst && inst->type) {
-            bool is_tensor_infer = (inst->type->kind == Type::Kind::Tensor && 
-                                    inst->type->elem_type()->is_infer());
+            bool is_tensor_infer = (inst->type->kind == Type::Kind::Tensor && inst->type->elem_type()->is_infer());
             if (inst->type->is_infer() || is_tensor_infer) {
                 std::cerr << "[DEBUG] Unresolved type in IR emission!\n"
                         << "  Instruction: " << inst->name << "\n"
                         << "  Detected Type: " << inst->type->str() << "\n";
-                // Helpful if you have a way to dump the current function/block
+                // TODO: dump the current function/block
                 // std::cerr << "  Context: " << bb_->name << std::endl;
             }
         }
@@ -179,8 +198,7 @@ public:
         return inst;
     }
  
-    // ── Public lowering ───────────────────────────────────────────────────────
- 
+    // Public lowering interfaces
     Value* lower_expr(const Expr& e)
     {
         switch (e.kind.tag) {
@@ -238,18 +256,35 @@ public:
             lower_compound(s.kind.else_body);
             return nullptr;
         }
-        case StmtKind::Tag::Import:   // handled by ImportResolver
-        case StmtKind::Tag::Struct:   // type declaration, no IR
+        case StmtKind::Tag::Import: // handled by ImportResolver
+        case StmtKind::Tag::Struct:
         default:
             return nullptr;
         }
     }
  
 private:
+    void register_builtins(const io::BuiltinRegistry& builtins) {
+        // Create a global scope for builtin symbols
+        push_scope();
+        // Register all builtin modules and their symbols
+        for (const auto& module_name : builtins.module_names()) {
+            const auto* module_ptr = builtins.get_module(module_name);
+            if (!module_ptr) continue;
+            // Register each symbol in the module as "module_name::symbol_name"
+            for (const auto& [symbol_name, symbol] : module_ptr->symbols) {
+                std::string full_name = module_name + "::" + symbol_name;
+                // Register the builtin symbol directly using its known type
+                ir::Function* fn_ptr = mod_->add_function(full_name, symbol.type, false);
+                define(full_name, fn_ptr);
+            }
+        }
+    }
+
     ir::IRModule* mod_;
-    Function*   fn_      = nullptr;
-    BasicBlock* bb_      = nullptr;
-    int         counter_ = 0;
+    Function* fn_ = nullptr;
+    BasicBlock* bb_ = nullptr;
+    int counter_ = 0;
     std::unordered_map<std::string, int> name_counts_;
     std::vector<Scope> scopes_;
     std::vector<BasicBlock*> loop_exit_stack_;
@@ -269,7 +304,7 @@ private:
         Value* r = c.get(); ptr_cache_[r] = std::move(c); return r;
     }
  
-    // ── TyKind → TypePtr ──────────────────────────────────────────────────────
+    // TyKind → TypePtr mapping
     static TypePtr ty(TyKind tk) {
         switch (tk) {
         case TyKind::Void:   return Type::void_();
@@ -287,15 +322,31 @@ private:
  
     TypePtr expr_type(const Expr& e) const {
         if (e.resolved_type) return e.resolved_type;
-        if (e.kind.tag == ExprKind::Tag::Id) return ty(e.kind.id.ty_kind());
+        if (e.kind.tag == ExprKind::Tag::Id) return Type::fromTyKind(e.kind.id.ty_kind(), e.kind.id.type_name());
         return Type::infer();
     }
- 
-    // ── Top-level ─────────────────────────────────────────────────────────────
+
+    void rename_field_aliases(const std::string& old_prefix, const std::string& new_prefix) {
+        if (old_prefix == new_prefix) return;
+        for (auto& scope : scopes_) {
+            std::vector<std::pair<std::string, std::string>> remap;
+            for (auto& [key, value] : scope) {
+                if (key.rfind(old_prefix + ".", 0) == 0) remap.emplace_back(key, new_prefix + key.substr(old_prefix.size()));
+            }
+            for (auto& [old_key, new_key] : remap) {
+                Value* v = scope[old_key];
+                scope.erase(old_key);
+                scope[new_key] = v;
+                if (v) v->name = new_key;
+            }
+        }
+    }
+
+    // Top-level lowering
     void lower_top_level(const Stmt& s) {
         switch (s.kind.tag) {
-        case StmtKind::Tag::Func:   lower_func_stmt(s); break;
-        case StmtKind::Tag::Let:    lower_global_let(s); break;
+        case StmtKind::Tag::Func: lower_func_stmt(s); break;
+        case StmtKind::Tag::Let: lower_global_let(s); break;
         default: break;
         }
     }
@@ -309,7 +360,7 @@ private:
               << (int)f.ident.ty_kind() << std::endl;
         std::vector<TypePtr> ptypes;
         for (auto& p : f.params) ptypes.push_back(ty(p.ty_kind()));
-        TypePtr ret_ty  = ty(f.ident.ty_kind());
+        TypePtr ret_ty = ty(f.ident.ty_kind());
         TypePtr fn_type = Type::fn(ptypes, ret_ty);
 
         const std::string& raw = f.ident.name();
@@ -318,7 +369,6 @@ private:
         global_functions[f.ident.name()] = fn;
         set_function(fn); push_scope();
         set_block(fn->create_entry());
- 
         for (auto& p : f.params) {
             Argument* a = fn->add_param("%" + p.name(), ty(p.ty_kind()));
             define(p.name(), a);
@@ -348,37 +398,35 @@ private:
         pop_scope();
     }
  
-    // ── Statements ────────────────────────────────────────────────────────────
- 
+    // Statements
     void lower_let(const Stmt& s) {
         const Ident& id = s.kind.let_ident;
         if (!s.kind.let_expr) {
-            // Uninitialized mutable — emit alloca
+            // Uninitialized mutable -> emit alloca
             auto* alloca = emit<AllocaInst>(fresh(id.name()), ty(id.ty_kind()));
             define(id.name(), alloca);
             return;
         }
         Value* rhs = lower_expr(*s.kind.let_expr);
+        std::string old_name = rhs->name;
         rhs->name = "%" + id.name();
+        rename_field_aliases(old_name, rhs->name);
         define(id.name(), rhs);
     }
  
     void lower_return(const Stmt& s) {
         if (s.kind.ret_expr) emit<ReturnInst>(vp(lower_expr(*s.kind.ret_expr)));
-        else                  emit<ReturnInst>();
+        else emit<ReturnInst>();
     }
  
     void lower_if_stmt(const Stmt& s) {
-        Value* cond     = lower_expr(*s.kind.if_cond);
-        auto* then_bb   = fn_->add_block(fresh_label("if.true"));
-        auto* merge_bb  = fn_->add_block(fresh_label("if.merge"));
+        Value* cond = lower_expr(*s.kind.if_cond);
+        auto* then_bb = fn_->add_block(fresh_label("if.true"));
+        auto* merge_bb = fn_->add_block(fresh_label("if.merge"));
         bool has_else = s.kind.else_or_else_if || !s.kind.else_body.stmts.empty();
-        auto* else_bb   = has_else
-                        ? fn_->add_block(fresh_label("if.false"))
-                        : nullptr;
- 
+        auto* else_bb = has_else ? fn_->add_block(fresh_label("if.false")) : nullptr;
         emit<CondBranchInst>(vp(cond), then_bb, else_bb ? else_bb : merge_bb);
- 
+
         set_block(then_bb);
         lower_compound(s.kind.if_body);
         if (!bb_->is_terminated()) emit<BranchInst>(merge_bb);
@@ -397,8 +445,8 @@ private:
  
     void lower_while(const Stmt& s) {
         auto* header = fn_->add_block(fresh_label("while.cond"));
-        auto* body   = fn_->add_block(fresh_label("while.body"));
-        auto* exit   = fn_->add_block(fresh_label("while.exit"));
+        auto* body = fn_->add_block(fresh_label("while.body"));
+        auto* exit = fn_->add_block(fresh_label("while.exit"));
         emit<BranchInst>(header);
  
         set_block(header);
@@ -421,8 +469,8 @@ private:
     void lower_for(const Stmt& s) {
         Value* iter_val = lower_expr(*s.kind.for_iter);
         auto* header = fn_->add_block(fresh_label("for.cond"));
-        auto* body   = fn_->add_block(fresh_label("for.body"));
-        auto* exit   = fn_->add_block(fresh_label("for.exit"));
+        auto* body = fn_->add_block(fresh_label("for.body"));
+        auto* exit = fn_->add_block(fresh_label("for.exit"));
         emit<BranchInst>(header);
  
         // Placeholder has_next condition
@@ -447,15 +495,13 @@ private:
     }
  
     void lower_break() {
-        if (loop_exit_stack_.empty())
-            throw std::runtime_error("IRBuilder: break outside loop");
+        if (loop_exit_stack_.empty()) throw std::runtime_error("IRBuilder: break outside loop");
         emit<BranchInst>(loop_exit_stack_.back());
         set_block(fn_->add_block(fresh_label("dead")));
     }
  
     void lower_continue() {
-        if (loop_header_stack_.empty())
-            throw std::runtime_error("IRBuilder: continue outside loop");
+        if (loop_header_stack_.empty()) throw std::runtime_error("IRBuilder: continue outside loop");
         emit<BranchInst>(loop_header_stack_.back());
         set_block(fn_->add_block(fresh_label("dead")));
     }
@@ -465,19 +511,14 @@ private:
         // Full pattern compilation is a separate pass
     }
  
-    // ── Expressions ───────────────────────────────────────────────────────────
- 
+    // Expressions
     Value* lower_lit(const Expr& e) {
         const LitKind& lit = e.kind.lit;
         switch (lit.tag) {
         case LitKind::Tag::Int:
-            return keep(std::make_shared<ConstantInt>(
-                std::stoll(lit.str_val),
-                e.resolved_type ? e.resolved_type : Type::i64()));
+            return keep(std::make_shared<ConstantInt>(std::stoll(lit.str_val), e.resolved_type ? e.resolved_type : Type::i64()));
         case LitKind::Tag::Float:
-            return keep(std::make_shared<ConstantFloat>(
-                std::stod(lit.str_val),
-                e.resolved_type ? e.resolved_type : Type::f64()));
+            return keep(std::make_shared<ConstantFloat>(std::stod(lit.str_val), e.resolved_type ? e.resolved_type : Type::f64()));
         case LitKind::Tag::Bool:
             return keep(std::make_shared<ConstantBool>(lit.bool_val));
         case LitKind::Tag::Str:
@@ -494,16 +535,13 @@ private:
             v = mod_->find_function(fn_name);
         }
         if (!v) throw std::runtime_error("IRBuilder: undefined name '" + name + "'");
-        if (dynamic_cast<AllocaInst*>(v))
-            return emit<LoadInst>(fresh(name), v->type, vp(v));
+        if (dynamic_cast<AllocaInst*>(v)) return emit<LoadInst>(fresh(name), v->type, vp(v));
         return v;
     }
  
     Value* lower_binary(const Expr& e) {
-        if (!e.kind.lhs || !e.kind.rhs) {
-            throw std::runtime_error("IRBuilder: Malformed binary expression (null operand)");
-        }
-        TypePtr ty_  = expr_type(e);
+        if (!e.kind.lhs || !e.kind.rhs) throw std::runtime_error("IRBuilder: Malformed binary expression (null operand)");
+        TypePtr ty_ = expr_type(e);
         // Comparison → CmpInst
         switch (e.kind.bin_op) {
         case BinOp::Eq:     { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Eq,vp(l),vp(r)); }
@@ -514,7 +552,16 @@ private:
         case BinOp::Gte:    { auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs); return emit<CmpInst>(fresh(),CmpCode::Ge,vp(l),vp(r)); }
         case BinOp::MatMul: {
             auto l=lower_expr(*e.kind.lhs),r=lower_expr(*e.kind.rhs);
-            return emit<TensorOpInst>(fresh(),ty_,TensorOpCode::MatMul,std::vector<ValuePtr>{vp(l),vp(r)});
+            TypePtr matmul_ty = ty_;
+            if (!matmul_ty || matmul_ty->is_infer()) {
+                if (l->type && l->type->kind == Type::Kind::Tensor && !l->type->elem_type()->is_infer())
+                    matmul_ty = l->type;
+                else if (r->type && r->type->kind == Type::Kind::Tensor && !r->type->elem_type()->is_infer())
+                    matmul_ty = r->type;
+                else
+                    matmul_ty = Type::tensor(Type::f32());
+            }
+            return emit<TensorOpInst>(fresh(), matmul_ty, TensorOpCode::MatMul, std::vector<ValuePtr>{vp(l),vp(r)});
         }
         default: break;
         }
@@ -544,9 +591,7 @@ private:
         Value* operand = lower_expr(*e.kind.operand);
         TypePtr ty_ = expr_type(e);
         bool f = ty_ && ty_->is_float();
-        UnOpCode op = (e.kind.unary_op == UnaryOp::Neg)
-                    ? (f ? UnOpCode::FNeg : UnOpCode::Neg)
-                    : UnOpCode::Not;
+        UnOpCode op = (e.kind.unary_op == UnaryOp::Neg) ? (f ? UnOpCode::FNeg : UnOpCode::Neg) : UnOpCode::Not;
         return emit<UnOpInst>(fresh(), ty_, op, vp(operand));
     }
  
@@ -592,6 +637,18 @@ private:
             Value* index = lower_expr(*lval.kind.index);
             emit<TensorOpInst>("", Type::void_(), TensorOpCode::Scatter,
                 std::vector<ValuePtr>{vp(base), vp(index), vp(val)});
+        } else if (lval.kind.tag == ExprKind::Tag::Field) {
+            Value* obj = lower_expr(*lval.kind.target);
+            std::string qname = obj->name + "." + lval.kind.member;
+            Value* slot = lookup(qname);
+            if (!slot) {
+                TypePtr field_ty = expr_type(lval);
+                auto field_ptr = std::make_shared<Value>(qname, field_ty);
+                slot = field_ptr.get();
+                keep(field_ptr);
+                define(qname, slot);
+            }
+            emit<StoreInst>(vp(val), vp(slot));
         } else {
             throw std::runtime_error("IRBuilder: unsupported lvalue");
         }
@@ -625,18 +682,15 @@ private:
         return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(callee_val), std::move(args));
     }
  
-    Value* lower_tensor_call(const Expr& scope_callee,
-                              const std::vector<ExprPtr>& ast_args,
-                              TypePtr ret_type)
+    Value* lower_tensor_call(const Expr& scope_callee, const std::vector<ExprPtr>& ast_args, TypePtr ret_type)
     {
         TensorOpCode op = resolve_tensor_op(scope_callee.kind.member);
         std::vector<ValuePtr> args;
         for (auto& a : ast_args) args.push_back(vp(lower_expr(*a)));
         TypePtr effective_ty = ret_type;
-        if (effective_ty->is_infer() || effective_ty->elem_type()->is_infer()) {
+        if (!effective_ty || effective_ty->is_infer() || (effective_ty->kind == Type::Kind::Tensor && (!effective_ty->elem_type() || effective_ty->elem_type()->is_infer()))) {
             // Default: try to copy element type from first good tensor arg
-            TypePtr elem_ty = Type::f32();  // safe fallback
-
+            TypePtr elem_ty = Type::f32();
             for (const auto& arg : args) {
                 if (arg->type && arg->type->kind == Type::Kind::Tensor) {
                     TypePtr el = arg->type->elem_type();
@@ -646,10 +700,8 @@ private:
                     }
                 }
             }
-
             // Most tensor ops preserve tensor + element type
             effective_ty = Type::tensor(elem_ty);
-
             // Special case: matmul (still tensor)
             if (op == TensorOpCode::MatMul) {
                 // could add shape inference later, for now just ensure tensor<f32>
@@ -685,15 +737,21 @@ private:
     Value* lower_index(const Expr& e) {
         Value* base  = lower_expr(*e.kind.target);
         Value* index = lower_expr(*e.kind.index);
-        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Select,
-            std::vector<ValuePtr>{vp(base), vp(index)});
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Select, std::vector<ValuePtr>{vp(base), vp(index)});
     }
  
     Value* lower_field_expr(const Expr& e) {
         Value* obj = lower_expr(*e.kind.target);
         std::string qname = obj->name + "." + e.kind.member;
-        if (Value* v = lookup(qname)) return v;
-        return emit<LoadInst>(fresh(e.kind.member), expr_type(e), vp(obj));
+        Value* slot = lookup(qname);
+        if (!slot) {
+            TypePtr field_ty = expr_type(e);
+            auto field_ptr = std::make_shared<Value>(qname, field_ty);
+            slot = field_ptr.get();
+            keep(field_ptr);
+            define(qname, slot);
+        }
+        return emit<LoadInst>(fresh(e.kind.member), expr_type(e), vp(slot));
     }
  
     Value* lower_scope_expr(const Expr& e) {
@@ -714,15 +772,14 @@ private:
             throw std::runtime_error("IRBuilder Error: 'await' expression is missing its target operand.");
         }
         Value* handle = lower_expr(*e.kind.operand);
-        TypePtr awaited_ty = handle->type;
-        return emit<AwaitInst>(fresh("await_tmp"), awaited_ty, vp(handle));
+        TypePtr result_ty = e.resolved_type && !e.resolved_type->is_infer() ? e.resolved_type : handle->type;
+        return emit<AwaitInst>(fresh("await_tmp"), result_ty, vp(handle));
     }
  
     Value* lower_grad(const Expr& e) {
         Value* loss   = lower_expr(*e.kind.grad_loss);
         Value* params = lower_expr(*e.kind.grad_params);
-        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Grad,
-            std::vector<ValuePtr>{vp(loss), vp(params)});
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Grad, std::vector<ValuePtr>{vp(loss), vp(params)});
     }
  
     Value* lower_if_expr(const Expr& e) {
@@ -782,17 +839,15 @@ private:
     Value* lower_range(const Expr& e) {
         Value* lo = lower_expr(*e.kind.lhs);
         Value* hi = lower_expr(*e.kind.rhs);
-        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Arange,
-            std::vector<ValuePtr>{vp(lo), vp(hi)});
+        return emit<TensorOpInst>(fresh(), expr_type(e), TensorOpCode::Arange, std::vector<ValuePtr>{vp(lo), vp(hi)});
     }
  
     Value* lower_channel_send(const Expr& e) {
-        Value* ch  = lower_expr(*e.kind.channel);
+        Value* ch = lower_expr(*e.kind.channel);
         Value* val = lower_expr(*e.kind.send_val);
         auto callee = std::make_shared<Value>("__channel_send", Type::fn({}, Type::void_()));
         keep(callee);
-        emit<CallInst>("", Type::void_(), vp(callee.get()),
-            std::vector<ValuePtr>{vp(ch), vp(val)});
+        emit<CallInst>("", Type::void_(), vp(callee.get()), std::vector<ValuePtr>{vp(ch), vp(val)});
         return nullptr;
     }
  
@@ -822,7 +877,7 @@ private:
         std::string name = fresh_label("__lambda");
         std::vector<TypePtr> ptypes;
         for (auto& [pname, pk] : e.kind.fn_params) ptypes.push_back(ty(pk));
-        TypePtr ret_ty  = ty(e.kind.fn_ret_type);
+        TypePtr ret_ty = ty(e.kind.fn_ret_type);
         TypePtr fn_type = Type::fn(ptypes, ret_ty);
         Function* fn = mod_->add_function("@" + name, fn_type, e.kind.is_async_fn);
  
@@ -841,7 +896,6 @@ private:
         pop_scope();
  
         fn_ = sfn; bb_ = sbb; scopes_ = std::move(sscopes); counter_ = sc;
- 
         auto fn_val = std::make_shared<Value>("@" + name, fn_type);
         keep(fn_val);
         return fn_val.get();
@@ -855,19 +909,20 @@ private:
  
     Value* lower_struct_lit(const Expr& e) {
         TypePtr ty_ = expr_type(e);
-        auto* alloca = emit<AllocaInst>(fresh(e.kind.struct_init_name), ty_);
+        auto struct_val = std::make_shared<Value>(fresh(e.kind.struct_init_name), ty_);
+        Value* struct_ptr = struct_val.get();
+        keep(struct_val);
         for (auto& [fname, fexpr] : e.kind.struct_init_fields) {
             Value* fval = lower_expr(*fexpr);
-            std::string qname = alloca->name + "." + fname;
+            std::string qname = struct_ptr->name + "." + fname;
             auto* fslot = emit<AllocaInst>(qname, fval->type);
             emit<StoreInst>(vp(fval), vp(fslot));
             define(qname, fslot);
         }
-        return alloca;
+        return struct_ptr;
     }
  
-    // ── Helpers ───────────────────────────────────────────────────────────────
- 
+    // Helpers
     std::string fresh_label(const std::string& base) {
         auto it = name_counts_.find(base);
         if (it == name_counts_.end()) { name_counts_[base] = 1; return base; }
@@ -879,11 +934,9 @@ private:
         const LitKind& lit = e.kind.lit;
         switch (lit.tag) {
         case LitKind::Tag::Int:
-            return std::make_shared<ConstantInt>(std::stoll(lit.str_val),
-                e.resolved_type ? e.resolved_type : Type::i64());
+            return std::make_shared<ConstantInt>(std::stoll(lit.str_val), e.resolved_type ? e.resolved_type : Type::i64());
         case LitKind::Tag::Float:
-            return std::make_shared<ConstantFloat>(std::stod(lit.str_val),
-                e.resolved_type ? e.resolved_type : Type::f64());
+            return std::make_shared<ConstantFloat>(std::stod(lit.str_val), e.resolved_type ? e.resolved_type : Type::f64());
         case LitKind::Tag::Bool:
             return std::make_shared<ConstantBool>(lit.bool_val);
         case LitKind::Tag::Str:
@@ -951,9 +1004,7 @@ private:
     }
  
     static bool op_is_void(TensorOpCode op) {
-        return op == TensorOpCode::Backward ||
-               op == TensorOpCode::ZeroGrad ||
-               op == TensorOpCode::NoGrad;
+        return op == TensorOpCode::Backward || op == TensorOpCode::ZeroGrad || op == TensorOpCode::NoGrad;
     }
 };
  

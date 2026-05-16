@@ -29,8 +29,7 @@ TypePtr Type::fromTyKind(
         case TyKind::UserDef: return named(type_name);
         case TyKind::Array:   return array(arg(0));
         case TyKind::Tensor:  {
-            TypePtr elem = (inner_args.empty() || !inner_args[0])
-                         ? f32() : inner_args[0];
+            TypePtr elem = (inner_args.empty() || !inner_args[0]) ? f32() : inner_args[0];
             return tensor(std::move(elem), std::move(tensor_shape));
         }
         case TyKind::Map:     return map(arg(0), arg(1));

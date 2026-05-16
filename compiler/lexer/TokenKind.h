@@ -1,11 +1,12 @@
 #pragma once
 #include <string>
 
+// list of all token kinds that can be produced
 enum class TokenKind
 {
-    EOF_TOKEN,
+    EOF_TOKEN, // end of file/input
 
-    IDENTIFIER,
+    IDENTIFIER, // variable names, function names, etc.
     NUMBER,
     STRING,
     FLOAT,
@@ -24,7 +25,7 @@ enum class TokenKind
     // declaration keywords
     KW_FN,
     KW_LET,
-    KW_PUB,
+    KW_PUB, // public visibility modifier for functions and structs
 
     // primitive type keywords
     KW_I32, KW_I64,
@@ -40,14 +41,14 @@ enum class TokenKind
     KW_TUPLE,    // Tuple[...]
     KW_QUEUE,    // Queue[...] for distributed pipelines
     KW_STACK,    // Stack[...]
-    KW_TENSOR,         // also triggers context-switch for '[' and ';'
-    KW_GRAD,           // gradient context
+    KW_TENSOR,   // also triggers context-switch for '[' and ';'
+    KW_GRAD,     // gradient context
 
     // async or distributed keywords
-    KW_ASYNC,          // distributed async ops
-    KW_AWAIT,
-    KW_SPAWN,          // spawn a distributed worker
-    KW_YIELD,          // generator / lazy evaluation
+    KW_ASYNC,    // distributed async ops
+    KW_AWAIT,    // await on async result
+    KW_SPAWN,    // spawn a distributed worker
+    KW_YIELD,    // generator / lazy evaluation
 
     // module system keywords
     KW_IMPORT,

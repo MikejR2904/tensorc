@@ -9,15 +9,18 @@
 #include "../lexer/TokenKind.h"
 #include "Type.h"
 
+// List of structs representing different AST node types, and enums for expression/statement kinds, binary/unary operators, etc.
 struct Expr;
 struct Stmt;
 struct Compound;
 struct Func;
 struct MatchArm;
 
-using ExprPtr  = std::unique_ptr<Expr>;
-using StmtPtr  = std::unique_ptr<Stmt>;
+// Similar to how we do TypePtr, we can define ExprPtr and StmtPtr
+using ExprPtr = std::unique_ptr<Expr>;
+using StmtPtr = std::unique_ptr<Stmt>;
 
+// TyKind is needed to represent the type of an identifier before we resolve it to a full TypePtr, especially for user-defined types and generics. It also helps during parsing when we only have the syntactic type information. The Type struct is richer and used later during semantic analysis and IR generation to represent fully resolved types with their inner structure (e.g. element types, shape).
 enum class TyKind
 {
     // primitives
@@ -36,7 +39,7 @@ enum class TyKind
     Array,
     // fn(T) -> T, generic type parameter (name stored separately)
     FnType,
-    Generic,
+    Generic, // Note that in Type::Kind we have Var for generic type parameters and Named, while here in TyKind we have Generic.
     // type not annotated, to be inferred later
     Infer,
     // named user type  e.g. MyStruct
@@ -44,7 +47,7 @@ enum class TyKind
     Task,
 };
 
-enum class IdentCtx
+enum class IdentCtx // The context in which an identifier appears, which can affect how we resolve its type and usage during semantic analysis.
 {
     Def,        // variable definition
     Ref,        // variable reference
@@ -55,17 +58,17 @@ enum class IdentCtx
 
 struct GenericParams
 {
-    std::vector<TyKind> type_params;   // f32, i32 ...
+    std::vector<TyKind> type_params; // f32, i32 ...
     std::vector<std::variant<int, std::string>> shape; // [3, 4] or [N, M]
     Position pos;
 };
 
-struct IdentInfo
+struct IdentInfo // the information we need to keep track of for each identifier in the program
 {
     std::string name;
-    TyKind      ty_kind;
-    IdentCtx    ctx;
-    Position    pos;
+    TyKind ty_kind;
+    IdentCtx ctx;
+    Position pos;
     std::optional<std::string> user_type_name;
     bool requires_grad = false;
     std::optional<GenericParams> tensor_gp;
@@ -73,21 +76,22 @@ struct IdentInfo
         : name(std::move(n)), ty_kind(t), ctx(c), pos(p), user_type_name(std::move(user_ty)), requires_grad(grad) {}
 };
 
-struct Ident
+struct Ident // Wrapper around IdentInfo to represent either a qualified or unqualified identifier. For example, in a qualified identifier like Module::Type, "Type" would be the leaf name and "Module" would be the qualifier. The kind field indicates whether it's qualified or unqualified, and the info field contains the information about the leaf name. The qualifier field is optional and only used for qualified identifiers.
 {
     enum class Kind { Unqual, Qual } kind;
-    IdentInfo info;                         // the leaf name
+    IdentInfo info; // the leaf name
     std::optional<IdentInfo> qualifier;
 
     static Ident unqual(IdentInfo info) { return Ident{ Kind::Unqual, std::move(info), std::nullopt }; }
     static Ident qual(IdentInfo qualifier, IdentInfo info) { return Ident{ Kind::Qual, std::move(info), std::move(qualifier) }; }
 
-    const std::string& name()    const { return info.name; }
-    TyKind             ty_kind() const { return info.ty_kind; }
-    IdentCtx           ctx()     const { return info.ctx; }
-    const Position&    pos()     const { return info.pos; }
+    const std::string& name() const { return info.name; }
+    TyKind ty_kind() const { return info.ty_kind; }
+    IdentCtx ctx() const { return info.ctx; }
+    const Position& pos() const { return info.pos; }
+
     void set_ty_kind(TyKind t) { info.ty_kind = t; }
-    void set_ctx(IdentCtx c)   { info.ctx = c; }
+    void set_ctx(IdentCtx c) { info.ctx = c; }
     const std::optional<std::string>& user_type_name() const { return info.user_type_name; }
     const std::string& type_name() const
     {
@@ -102,14 +106,14 @@ struct Ident
     void set_tensor_gp(GenericParams gp) { info.tensor_gp = std::move(gp); }
 };
 
-struct Compound
+struct Compound // Compound is used for the bodies of functions, if/else branches, match arms, and blocks. It contains a list of statements and an optional tail expression. If the tail expression is present, it means the compound is used as an expression (e.g. in an if branch or match arm) and the value of the compound is the value of the tail expression. If the tail expression is absent, it means the compound is used as a statement block and does not produce a value.
 {
-    std::vector<StmtPtr>  stmts;
+    std::vector<StmtPtr> stmts;
     std::optional<size_t> break_idx;
-    Position              pos;
-    void addStmt(StmtPtr s)         { stmts.push_back(std::move(s)); }
-    void setBreakIdx(size_t i)      { break_idx = i; }
-    ExprPtr               tail_expr;
+    Position pos;
+    void addStmt(StmtPtr s) { stmts.push_back(std::move(s)); }
+    void setBreakIdx(size_t i) { break_idx = i; }
+    ExprPtr tail_expr;
 };
 
 enum class BinOp
@@ -133,11 +137,30 @@ enum class UnaryOp
     Not,    // !x
 };
 
-struct LitKind
+struct Func
+{
+    Ident ident;      // name + return type stored in ident.ty_kind
+    std::vector<std::string> generic_names;
+    std::vector<Ident> params;
+    Compound body;
+    bool is_async = false;
+    Func(Ident id, std::vector<Ident> p, Compound b) : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
+};
+
+struct StructField
+{
+    std::string name;
+    TyKind ty;
+    Position pos;
+    std::string user_type_name;
+    StructField(std::string n, TyKind t, Position p) : name(std::move(n)), ty(t), pos(std::move(p)) {};
+};
+
+struct LitKind // We use a single struct with a tag to represent all literal kinds, instead of a union or separate structs, for simplicity. The str_val field is used for both string literals and for the textual representation of numeric literals (e.g. "3.14" for a float literal). The bool_val field is only used when the tag is Bool.
 {
     enum class Tag { Int, Float, Str, Bool } tag;
     std::string str_val;
-    bool        bool_val = false;
+    bool bool_val = false;
 
     static LitKind makeInt(std::string v) { return LitKind{ Tag::Int, std::move(v), false }; }
     static LitKind makeFloat(std::string v) { return LitKind{ Tag::Float, std::move(v), false }; }
@@ -145,13 +168,13 @@ struct LitKind
     static LitKind makeBool(bool v) { return LitKind{ Tag::Bool, "", v }; }
 };
 
-struct MatchArm
+struct MatchArm // A match arm consists of a pattern, an optional guard expression, and a body which can be either an expression (if the match is used as an expression) or a statement block (if the match is used as a statement). The hasStmtBody() method is a helper to determine whether the body is an expression or a statement block.
 {
-    ExprPtr               pattern;
+    ExprPtr pattern;
     std::optional<ExprPtr> guard;
-    ExprPtr               body;
-    StmtPtr               body_stmt;
-    Position              pos;
+    ExprPtr body;
+    StmtPtr body_stmt;
+    Position pos;
     bool hasStmtBody() const { return body_stmt != nullptr; }
 };
 
@@ -159,7 +182,7 @@ struct ExprKind
 {
     enum class Tag
     {
-        Lit,
+        Lit,            // Literal tags all literal types (int, float, string, bool) with a LitKind struct
         Id,
         Binary,
         Unary,
@@ -191,28 +214,34 @@ struct ExprKind
 
     LitKind lit;
     Ident id{ Ident::unqual(IdentInfo{"", TyKind::Infer, IdentCtx::Ref, Position{}}) };
-    BinOp   bin_op = BinOp::Add;
+    BinOp bin_op = BinOp::Add;
     ExprPtr lhs;
     ExprPtr rhs;
     UnaryOp unary_op = UnaryOp::Neg;
     ExprPtr operand;
-    ExprPtr                callee;
-    std::vector<ExprPtr>   args;
+    // Function calls
+    ExprPtr callee; // for function calls
+    std::vector<ExprPtr> args; // for function call arguments, or for elements in array/set/queue/stack/tuple literals
+    
     ExprPtr spawned_expr;
     ExprPtr index;
-    ExprPtr     target;
+    ExprPtr target; // for field access, scope access, indexing, unary ops, await, spawn, channel send
     std::string member;
     std::string resolved_user_type;
     ExprPtr condition;
     ExprPtr then_branch;
     ExprPtr else_branch;
-    ExprPtr                match_subject;
-    std::vector<MatchArm>  arms;
+    // Match expression
+    ExprPtr match_subject;
+    std::vector<MatchArm> arms;
+
     Compound block;
-    std::vector<std::string>               fn_generic_names;
+    // For function expressions
+    std::vector<std::string> fn_generic_names;
     std::vector<std::pair<std::string, TyKind>> fn_params;
-    TyKind                                 fn_ret_type = TyKind::Void;
-    Compound                               fn_body;
+    TyKind fn_ret_type = TyKind::Void;
+    Compound fn_body;
+
     ExprPtr pipe_lhs;
     ExprPtr pipe_rhs;
     ExprPtr channel;
@@ -220,10 +249,10 @@ struct ExprKind
     ExprPtr awaited;
     ExprPtr grad_loss;
     ExprPtr grad_params;
-    std::vector<ExprPtr>  elements;     // array / set / queue / stack / tuple
-    std::vector<std::vector<ExprPtr>> rows;   // tensor  (row-major)
+    std::vector<ExprPtr> elements; // array / set / queue / stack / tuple
+    std::vector<std::vector<ExprPtr>> rows; // tensor (row-major)
     std::optional<GenericParams> generic_params;
-    std::vector<std::pair<ExprPtr,ExprPtr>> map_pairs;  // Map{"k": v}
+    std::vector<std::pair<ExprPtr,ExprPtr>> map_pairs; // Map{"k": v}
 
     std::string struct_init_name;
     std::vector<std::pair<std::string, ExprPtr>> struct_init_fields;
@@ -313,16 +342,16 @@ struct ExprKind
     static ExprKind makeIndex(ExprPtr collection, ExprPtr subscript)
     {
         ExprKind ek;
-        ek.tag    = Tag::Index;
+        ek.tag = Tag::Index;
         ek.target = std::move(collection);
-        ek.index  = std::move(subscript);
+        ek.index = std::move(subscript);
         return ek;
     }
 
     static ExprKind makeField(ExprPtr object, std::string field_name)
     {
         ExprKind ek;
-        ek.tag    = Tag::Field;
+        ek.tag = Tag::Field;
         ek.target = std::move(object);
         ek.member = std::move(field_name);
         return ek;
@@ -331,7 +360,7 @@ struct ExprKind
     static ExprKind makeScope(ExprPtr ns, std::string item_name)
     {
         ExprKind ek;
-        ek.tag    = Tag::Scope;
+        ek.tag = Tag::Scope;
         ek.target = std::move(ns);
         ek.member = std::move(item_name);
         return ek;
@@ -362,44 +391,11 @@ struct ExprKind
 
     static ExprKind makeStructLit(std::string name, std::vector<std::pair<std::string, ExprPtr>> fields) {
         ExprKind ek;
-        ek.tag               = Tag::StructLit;
-        ek.struct_init_name  = std::move(name);
+        ek.tag = Tag::StructLit;
+        ek.struct_init_name = std::move(name);
         ek.struct_init_fields = std::move(fields);
         return ek;
     }
-};
-
-struct ASTNode {
-    virtual ~ASTNode() = default; 
-    TypePtr resolved_type = nullptr;
-    Position pos;
-};
-
-struct Expr : public ASTNode
-{
-    ExprKind kind;
-    Position pos;
-    TypePtr resolved_type;
-    Expr(ExprKind k, Position p) : kind(std::move(k)), pos(p), resolved_type(nullptr) {}
-};
-
-struct Func
-{
-    Ident       ident;      // name + return type stored in ident.ty_kind
-    std::vector<std::string> generic_names;
-    std::vector<Ident>       params;
-    Compound    body;
-    bool        is_async = false;
-    Func(Ident id, std::vector<Ident> p, Compound b) : ident(std::move(id)), params(std::move(p)), body(std::move(b)) {}
-};
-
-struct StructField
-{
-    std::string name;
-    TyKind      ty;
-    Position    pos;
-    std::string user_type_name;
-    StructField(std::string n, TyKind t, Position p) : name(std::move(n)), ty(t), pos(std::move(p)) {};
 };
 
 struct StmtKind
@@ -423,33 +419,33 @@ struct StmtKind
         Struct,     // struct
     } tag;
 
-    Ident   let_ident{ Ident::unqual(IdentInfo{"", TyKind::Infer, IdentCtx::Def, Position{}}) };
+    Ident let_ident{ Ident::unqual(IdentInfo{"", TyKind::Infer, IdentCtx::Def, Position{}}) };
     ExprPtr let_expr;
     std::optional<Func> func;
     ExprPtr ret_expr;       // nullptr = bare return
-    ExprPtr  if_cond;
+    ExprPtr if_cond;
     Compound if_body;
-    StmtPtr  else_or_else_if;   // Else or If stmt, nullptr if absent
+    StmtPtr else_or_else_if;   // Else or If stmt, nullptr if absent
     Compound else_body;
-    ExprPtr  while_cond;    // nullptr = infinite loop
+    ExprPtr while_cond;    // nullptr = infinite loop
     Compound while_body;
     std::string for_var;
-    ExprPtr     for_iter;
-    Compound    for_body;
-    ExprPtr               match_subject;
+    ExprPtr for_iter;
+    Compound for_body;
+    ExprPtr match_subject;
     std::vector<MatchArm> match_arms;
     std::string import_path;
     std::string import_alias;   // "" if no alias
     StmtPtr spawn_fn;
     Compound compound;
     ExprPtr expr;
-    std::string              struct_name;
+    std::string struct_name;
     std::vector<StructField> struct_fields;
 
     static StmtKind makeStruct(std::string name, std::vector<StructField> fields)
     {
         StmtKind sk; sk.tag = Tag::Struct;
-        sk.struct_name   = std::move(name);
+        sk.struct_name = std::move(name);
         sk.struct_fields = std::move(fields);
         return sk;
     }
@@ -480,15 +476,29 @@ struct StmtKind
     }
 };
 
+// The base class for all AST nodes, containing common fields like resolved_type and position. Expr and Stmt will inherit from this.
+struct ASTNode {
+    virtual ~ASTNode() = default; 
+    TypePtr resolved_type = nullptr;
+    Position pos;
+};
+
+struct Expr : public ASTNode
+{
+    ExprKind kind;
+    Position pos;
+    TypePtr resolved_type;
+    Expr(ExprKind k, Position p) : kind(std::move(k)), pos(p), resolved_type(nullptr) {}
+};
+
 struct Stmt : public ASTNode
 {
     StmtKind kind;
     Position pos;
-    Stmt(StmtKind k, Position p)
-        : kind(std::move(k)), pos(p) {}
+    Stmt(StmtKind k, Position p) : kind(std::move(k)), pos(p) {}
 };
 
-struct Program
+struct Program // The root of the AST, containing a list of top-level statements (function definitions, global variable declarations, imports, etc.).
 {
     std::vector<StmtPtr> stmts;
     void addStmt(StmtPtr s) { stmts.push_back(std::move(s)); }

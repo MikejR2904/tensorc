@@ -1,9 +1,7 @@
 #pragma once
  
-/// ir/IRPrinter.h
-/// Converts an IRModule (or any sub-node) into human-readable text.
-///
-/// Output format (TensorC IR text)
+/// This file converts an IRModule (or any sub-node) into human-readable text.
+/// Example output format (TensorC IR text)
 /// ────────────────────────────────
 ///   module "path/to/file.tcc"
 ///
@@ -19,14 +17,13 @@
 ///     %r   = await %h             ; Tensor<f32>
 ///     ret %r
 ///
-/// Design notes
-/// ────────────
+/// Design notes:
 ///   - Every result-producing instruction prints:
 ///       <indent>%name = <mnemonic> <operands>  ; <type>
 ///   - Void instructions (store, br, ret void, barrier) print without lhs:
 ///       <indent><mnemonic> <operands>
 ///   - Type comments ("; <type>") help humans cross-check pass output.
-///   - The printer never modifies the IR — purely read-only.
+///   - The printer never modifies the IR, purely read-only.
 ///   - IRPrinter::print(module) → std::string  (main entry point)
 ///   - Individual print_* methods are public so passes can dump sub-trees.
  
@@ -41,8 +38,6 @@ namespace ir {
 class IRPrinter
 {
 public:
-    // ── Main entry points ─────────────────────────────────────────────────────
- 
     /// Print an entire module to a string.
     static std::string print(const IRModule& mod)
     {
@@ -75,41 +70,28 @@ public:
         return p.out_.str();
     }
  
-    // ── Streaming overload — write directly to an ostream ────────────────────
-    static void print(const IRModule& mod, std::ostream& os)
-    {
-        os << print(mod);
-    }
+    // Streaming overload, write directly to an ostream
+    static void print(const IRModule& mod, std::ostream& os) { os << print(mod); }
  
 private:
     std::ostringstream out_;
-    int                indent_ = 0;   ///< current indent level (steps of 2)
- 
-    // ── Indentation helpers ───────────────────────────────────────────────────
+    int indent_ = 0; // current indent level (steps of 2)
  
     void push() { indent_ += 2; }
     void pop()  { indent_ -= 2; }
- 
     void line(const std::string& s = "")
     {
-        if (!s.empty())
-            out_ << std::string(indent_, ' ') << s << "\n";
-        else
-            out_ << "\n";
+        if (!s.empty()) out_ << std::string(indent_, ' ') << s << "\n";
+        else out_ << "\n";
     }
- 
-    // ── Module ────────────────────────────────────────────────────────────────
- 
+
     void emit_module(const IRModule& mod)
     {
         out_ << "module \"" << mod.source_path << "\"\n";
- 
         // Imported module paths
         for (auto* imp : mod.imports)
             out_ << "import \"" << imp->source_path << "\"\n";
- 
-        if (!mod.imports.empty() || !mod.globals.empty())
-            out_ << "\n";
+        if (!mod.imports.empty() || !mod.globals.empty()) out_ << "\n";
  
         // Global constants / let bindings
         for (auto& g : mod.globals)
@@ -120,7 +102,6 @@ private:
             emit_constant_value(*g);
             out_ << "  ; " << type_str(g->type) << "\n";
         }
- 
         if (!mod.globals.empty()) out_ << "\n";
  
         // Functions (separated by blank lines)
@@ -132,9 +113,7 @@ private:
             if (i + 1 < mod.functions.size()) out_ << "\n";
         }
     }
- 
-    // ── Function ─────────────────────────────────────────────────────────────
- 
+
     void emit_function(const Function& fn)
     {
         // "fn" or "async fn"
@@ -160,25 +139,21 @@ private:
         pop();
     }
  
-    // ── Basic block ──────────────────────────────────────────────────────────
- 
     void emit_block(const BasicBlock& bb)
     {
         // Block label at current indent (one level less than instructions)
         out_ << std::string(indent_ - 2 < 0 ? 0 : indent_ - 2, ' ')
              << bb.label << ":\n";
- 
+
         for (auto& inst : bb.insts)
             emit_inst(*inst);
     }
  
-    // ── Instruction dispatcher ────────────────────────────────────────────────
- 
+    // Instruction dispatcher
     void emit_inst(const Instruction& inst)
     {
         // Dispatch to the correct print_* helper via dynamic_cast chain.
-        // Order matters for subclass disambiguation — more derived first.
- 
+        // Order matters for subclass disambiguation: more derived first.
         if (auto* i = dynamic_cast<const BinOpInst*>(&inst))      { print_binop(*i);       return; }
         if (auto* i = dynamic_cast<const UnOpInst*>(&inst))       { print_unop(*i);        return; }
         if (auto* i = dynamic_cast<const CmpInst*>(&inst))        { print_cmp(*i);         return; }
@@ -199,69 +174,30 @@ private:
         if (auto* i = dynamic_cast<const CastInst*>(&inst))       { print_cast(*i);        return; }
         if (auto* i = dynamic_cast<const ReshapeInst*>(&inst))    { print_reshape(*i);     return; }
  
-        // Fallback — should never happen if all instruction types are covered
+        // Fallback: should never happen if all instruction types are covered
         line("; <unknown instruction: " + inst.name + ">");
     }
  
-    // ── Per-instruction printers ──────────────────────────────────────────────
+    // Per-instruction printers
  
-    void print_binop(const BinOpInst& i)
-    {
-        line(i.name + " = " + binop_str(i.op)
-             + " " + val(i.lhs) + ", " + val(i.rhs)
-             + type_comment(i.type));
-    }
- 
-    void print_unop(const UnOpInst& i)
-    {
-        line(i.name + " = " + unop_str(i.op)
-             + " " + val(i.operand)
-             + type_comment(i.type));
-    }
- 
-    void print_cmp(const CmpInst& i)
-    {
-        line(i.name + " = cmp." + cmp_str(i.cmp)
-             + " " + val(i.lhs) + ", " + val(i.rhs)
-             + type_comment(i.type));
-    }
- 
-    void print_alloca(const AllocaInst& i)
-    {
-        line(i.name + " = alloca " + type_str(i.alloc_type));
-    }
- 
+    void print_binop(const BinOpInst& i) { line(i.name + " = " + binop_str(i.op) + " " + val(i.lhs) + ", " + val(i.rhs) + type_comment(i.type)); }
+    void print_unop(const UnOpInst& i) { line(i.name + " = " + unop_str(i.op) + " " + val(i.operand) + type_comment(i.type)); }
+    void print_cmp(const CmpInst& i) { line(i.name + " = cmp." + cmp_str(i.cmp) + " " + val(i.lhs) + ", " + val(i.rhs) + type_comment(i.type)); }
+    void print_alloca(const AllocaInst& i) { line(i.name + " = alloca " + type_str(i.alloc_type)); }
     void print_load(const LoadInst& i)
     {
-        line(i.name + " = load " + val(i.ptr)
-             + type_comment(i.type));
+        std::string opcode = "load";
+        if (i.ptr && i.ptr->name.find('.') != std::string::npos) opcode = "extract";
+        line(i.name + " = " + opcode + " " + val(i.ptr) + type_comment(i.type));
     }
- 
-    void print_store(const StoreInst& i)
-    {
-        line("store " + val(i.val) + " -> " + val(i.ptr));
-    }
- 
-    void print_br(const BranchInst& i)
-    {
-        line("br " + block_label(i.target));
-    }
- 
-    void print_condbr(const CondBranchInst& i)
-    {
-        line("br " + val(i.cond)
-             + ", " + block_label(i.true_bb)
-             + ", " + block_label(i.false_bb));
-    }
- 
+    void print_store(const StoreInst& i) { line("store " + val(i.val) + " -> " + val(i.ptr)); }
+    void print_br(const BranchInst& i) { line("br " + block_label(i.target)); }
+    void print_condbr(const CondBranchInst& i) { line("br " + val(i.cond) + ", " + block_label(i.true_bb) + ", " + block_label(i.false_bb)); }
     void print_ret(const ReturnInst& i)
     {
-        if (i.val)
-            line("ret " + val(*i.val));
-        else
-            line("ret void");
+        if (i.val) line("ret " + val(*i.val));
+        else line("ret void");
     }
- 
     void print_call(const CallInst& i)
     {
         std::string s;
@@ -327,49 +263,16 @@ private:
         s += type_comment(i.type);
         line(s);
     }
+
+    void print_spawn(const SpawnInst& i) { line(i.name + " = spawn " + val(i.task) + type_comment(i.type)); }
+    void print_await(const AwaitInst& i) { line(i.name + " = await " + val(i.handle) + type_comment(i.type)); }
+    void print_parallel_for(const ParallelForInst& i) { line("parallel_for " + val(i.n) + ", " + val(i.body_fn)); }
+    void print_parallel_map(const ParallelMapInst& i) { line(i.name + " = parallel_map " + val(i.array) + ", " + val(i.map_fn) + type_comment(i.type)); }
+    void print_barrier() { line("barrier"); }
+    void print_cast(const CastInst& i) { line(i.name + " = cast " + val(i.src) + " to " + type_str(i.target_type) + type_comment(i.type)); }
+    void print_reshape(const ReshapeInst& i) { line(i.name + " = reshape " + val(i.tensor) + ", " + val(i.shape) + type_comment(i.type)); }
  
-    void print_spawn(const SpawnInst& i)
-    {
-        line(i.name + " = spawn " + val(i.task) + type_comment(i.type));
-    }
- 
-    void print_await(const AwaitInst& i)
-    {
-        line(i.name + " = await " + val(i.handle) + type_comment(i.type));
-    }
- 
-    void print_parallel_for(const ParallelForInst& i)
-    {
-        line("parallel_for " + val(i.n) + ", " + val(i.body_fn));
-    }
- 
-    void print_parallel_map(const ParallelMapInst& i)
-    {
-        line(i.name + " = parallel_map " + val(i.array) + ", " + val(i.map_fn)
-             + type_comment(i.type));
-    }
- 
-    void print_barrier()
-    {
-        line("barrier");
-    }
- 
-    void print_cast(const CastInst& i)
-    {
-        line(i.name + " = cast " + val(i.src)
-             + " to " + type_str(i.target_type)
-             + type_comment(i.type));
-    }
- 
-    void print_reshape(const ReshapeInst& i)
-    {
-        line(i.name + " = reshape " + val(i.tensor)
-             + ", " + val(i.shape)
-             + type_comment(i.type));
-    }
- 
-    // ── Constant value emitter (for globals) ─────────────────────────────────
- 
+    // Constant value emitter (for globals)
     void emit_constant_value(const Value& v)
     {
         if (auto* c = dynamic_cast<const ConstantInt*>(&v))
@@ -407,7 +310,6 @@ private:
     std::string val(const ValuePtr& v) const
     {
         if (!v) return "<null>";
-
         // Inline small constants instead of a separate definition
         if (auto* c = dynamic_cast<const ConstantInt*>(v.get()))
             return std::to_string(c->value);
@@ -429,7 +331,7 @@ private:
         return v->name;
     }
  
-    // ── Type printer ──────────────────────────────────────────────────────────
+    // Type printer
  
     static std::string type_str(const TypePtr& t)
     {
@@ -444,6 +346,8 @@ private:
             case Type::Kind::F64:    return "f64";
             case Type::Kind::Str:    return "str";
             case Type::Kind::Infer:  return "_";
+            case Type::Kind::Named:  return t->type_name;
+            case Type::Kind::Var:    return t->type_name;
             case Type::Kind::Array:
                 return "Array<" + type_str(t->inner_type()) + ">";
             case Type::Kind::Tensor:
@@ -469,15 +373,13 @@ private:
         return "  ; " + type_str(t);
     }
  
-    // ── Block label helper ────────────────────────────────────────────────────
- 
+    // Block label helper
     static std::string block_label(const BasicBlock* bb)
     {
         return bb ? ("%" + bb->label) : "%<null>";
     }
  
-    // ── Opcode name tables ────────────────────────────────────────────────────
- 
+    // Opcode name tables
     static std::string binop_str(BinOpCode op)
     {
         switch (op)
@@ -653,6 +555,11 @@ private:
             case TensorOpCode::Detach:    return "detach";
             case TensorOpCode::ZeroGrad:  return "zero_grad";
             case TensorOpCode::RequiresGrad: return "requires_grad";
+            // Fused kernels; produced by FusionPass, never by the front-end
+            case TensorOpCode::FusedMatMulRelu: return "fused.matmul_relu";
+            case TensorOpCode::FusedMatMulGelu: return "fused.matmul_gelu";
+            case TensorOpCode::FusedMatMulSilu: return "fused.matmul_silu";
+            case TensorOpCode::FusedMatMulTanh: return "fused.matmul_tanh";
         }
         return "?";
     }

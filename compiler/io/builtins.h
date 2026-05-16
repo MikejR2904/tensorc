@@ -10,29 +10,18 @@
 #include <vector>
  
 namespace io {
- 
-// ─── Shape helpers ────────────────────────────────────────────────────────────
- 
-/// A compile-time static shape.  All dims must be > 0.
+
 using Shape = std::vector<int64_t>;
+constexpr int64_t DYNAMIC = -1; // DON'T use in static-shape signatures.
  
-/// Reserved sentinel — do NOT use in static-shape signatures.
-constexpr int64_t DYNAMIC = -1;
- 
-/// Convenience: produce a rank-1 shape.
-inline Shape shape1(int64_t d0)               { return {d0}; }
-/// Convenience: produce a rank-2 shape.
-inline Shape shape2(int64_t d0, int64_t d1)   { return {d0, d1}; }
-/// Convenience: produce a rank-4 shape (NCHW convention).
-inline Shape shape4(int64_t n, int64_t c,
-                    int64_t h, int64_t w)      { return {n, c, h, w}; }
- 
-// ─── ModuleExports ────────────────────────────────────────────────────────────
+inline Shape shape1(int64_t d0) { return {d0}; }
+inline Shape shape2(int64_t d0, int64_t d1) { return {d0, d1}; }
+inline Shape shape4(int64_t n, int64_t c, int64_t h, int64_t w) { return {n, c, h, w}; }
  
 /// All symbols exported by a single built-in (or user) module.
 struct ModuleExports
 {
-    std::string                             path;
+    std::string path;
     std::unordered_map<std::string, Symbol> symbols;
  
     bool define(Symbol sym)
@@ -56,26 +45,85 @@ struct ModuleExports
     }
 };
 
+// The following tables define the built-in methods available on certain types, along with their return types. This is used in SemanticAnalyzer.h when resolving member accesses like 'x.shape' or 'my_map.keys()'. The make_type function takes the receiver type (e.g. the type of 'x' in 'x.shape') and returns the type of the member (e.g. 'Array[i32]' for 'shape').
+struct BuiltinEntry {
+    Type::Kind receiver_kind;
+    std::string member;
+    std::function<TypePtr(const TypePtr&)> make_type;
+};
+
+inline const std::vector<BuiltinEntry>& builtin_method_table() {
+    static const std::vector<BuiltinEntry> tbl = {
+        { Type::Kind::Tensor, "shape",         [](const TypePtr&)   { return Type::array(Type::i32()); } },
+        { Type::Kind::Tensor, "rank",          [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Tensor, "size",          [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Tensor, "dtype",         [](const TypePtr&)   { return Type::str_(); } },
+        { Type::Kind::Tensor, "requires_grad", [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Tensor, "T",             [](const TypePtr& r) { return r; } },
+        { Type::Kind::Tensor, "grad",          [](const TypePtr& r) { return Type::tensor(r->elem_type()); } },
+        { Type::Kind::Tensor, "item",          [](const TypePtr& r) { return r->elem_type(); } },
+        { Type::Kind::Tensor, "sum",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "mean",          [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "min",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "max",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "prod",          [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+        { Type::Kind::Tensor, "flatten",       [](const TypePtr& r) { return Type::fn({}, r); } },
+        { Type::Kind::Tensor, "contiguous",    [](const TypePtr& r) { return Type::fn({}, r); } },
+        { Type::Kind::Tensor, "clone",         [](const TypePtr& r) { return Type::fn({}, r); } },
+        { Type::Kind::Tensor, "detach",        [](const TypePtr& r) { return Type::fn({}, r); } },
+
+        { Type::Kind::Array,  "len",           [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Array,  "is_empty",      [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Array,  "push",          [](const TypePtr& r) { return Type::fn({r->elem_type()}, Type::void_()); } },
+        { Type::Kind::Array,  "pop",           [](const TypePtr& r) { return Type::fn({}, r->elem_type()); } },
+
+        { Type::Kind::Map,    "len",           [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Map,    "is_empty",      [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Map,    "keys",          [](const TypePtr& r) { return Type::array(r->key_type()); } },
+        { Type::Kind::Map,    "values",        [](const TypePtr& r) { return Type::array(r->val_type()); } },
+        { Type::Kind::Map,    "contains",      [](const TypePtr& r) { return Type::fn({r->key_type()}, Type::bool_()); } },
+        { Type::Kind::Map,    "get",           [](const TypePtr& r) { return Type::fn({r->key_type()}, r->val_type()); } },
+        { Type::Kind::Map,    "insert",        [](const TypePtr& r) { return Type::fn({r->key_type(), r->val_type()}, Type::void_()); } },
+        { Type::Kind::Map,    "remove",        [](const TypePtr& r) { return Type::fn({r->key_type()}, Type::void_()); } },
+
+        { Type::Kind::Str,    "len",           [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Str,    "is_empty",      [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Str,    "to_upper",      [](const TypePtr&)   { return Type::fn({}, Type::str_()); } },
+        { Type::Kind::Str,    "to_lower",      [](const TypePtr&)   { return Type::fn({}, Type::str_()); } },
+        { Type::Kind::Str,    "trim",          [](const TypePtr&)   { return Type::fn({}, Type::str_()); } },
+        { Type::Kind::Str,    "contains",      [](const TypePtr&)   { return Type::fn({Type::str_()}, Type::bool_()); } },
+        { Type::Kind::Str,    "split",         [](const TypePtr&)   { return Type::array(Type::str_()); } },
+        { Type::Kind::Str,    "parse_i32",     [](const TypePtr&)   { return Type::i32(); } },
+        { Type::Kind::Str,    "parse_f32",     [](const TypePtr&)   { return Type::f32(); } },
+
+        { Type::Kind::Task,   "is_done",       [](const TypePtr&)   { return Type::bool_(); } },
+        { Type::Kind::Task,   "cancel",        [](const TypePtr&)   { return Type::fn({}, Type::void_()); } },
+    };
+    return tbl;
+}
+
+inline TypePtr lookup_builtin(const TypePtr& receiver, const std::string& member) {
+    if (!receiver) return nullptr;
+    for (auto& e : builtin_method_table())
+        if (e.receiver_kind == receiver->kind && e.member == member) return e.make_type(receiver);
+    return nullptr;
+}
+
+inline std::string builtin_members_for(Type::Kind k) {
+    std::string out;
+    for (auto& e : builtin_method_table())
+        if (e.receiver_kind == k) { if (!out.empty()) out += ", "; out += e.member; }
+    return out;
+}
+
 
 class BuiltinRegistry
 {
 public:
-    // ── Module registration ──────────────────────────────────────────────────
+    void add(const std::string& alias, std::shared_ptr<ModuleExports> mod) { modules_[alias] = std::move(mod); }
+    bool has_module(const std::string& alias) const { return modules_.count(alias) > 0; }
  
-    void add(const std::string& alias, std::shared_ptr<ModuleExports> mod)
-    {
-        modules_[alias] = std::move(mod);
-    }
- 
-    bool has_module(const std::string& alias) const
-    {
-        return modules_.count(alias) > 0;
-    }
- 
-    // ── Symbol lookup ────────────────────────────────────────────────────────
- 
-    const Symbol* lookup(const std::string& alias,
-                         const std::string& symbol_name) const
+    const Symbol* lookup(const std::string& alias, const std::string& symbol_name) const
     {
         auto mit = modules_.find(alias);
         if (mit == modules_.end()) return nullptr;
@@ -90,9 +138,21 @@ public:
         return mit->second->exported_names();
     }
  
-    // ── Factory ──────────────────────────────────────────────────────────────
+    // Get all module names for iteration
+    std::vector<std::string> module_names() const
+    {
+        std::vector<std::string> names;
+        names.reserve(modules_.size());
+        for (const auto& [name, _] : modules_) names.push_back(name);
+        return names;
+    }
  
-    /// Construct a registry pre-populated with every built-in module.
+    const ModuleExports* get_module(const std::string& alias) const
+    {
+        auto it = modules_.find(alias);
+        return (it != modules_.end()) ? it->second.get() : nullptr;
+    }
+ 
     static BuiltinRegistry with_builtins()
     {
         BuiltinRegistry reg;
@@ -108,12 +168,9 @@ public:
  
 private:
     std::unordered_map<std::string, std::shared_ptr<ModuleExports>> modules_;
- 
-    // Shorthand used throughout the register_* helpers.
     static Position P() { return {0, 0}; }
  
-    // ── std ──────────────────────────────────────────────────────────────────
- 
+    // std, standard utilities
     void register_std()
     {
         auto m = std::make_shared<ModuleExports>();
@@ -136,8 +193,7 @@ private:
         modules_["std"] = std::move(m);
     }
  
-    // ── math ─────────────────────────────────────────────────────────────────
- 
+    // math, encompassing general functions
     void register_math()
     {
         auto m = std::make_shared<ModuleExports>();
@@ -145,13 +201,9 @@ private:
         Position p = P();
  
         // Unary scalar ops
-        for (const char* name : { "sqrt", "cbrt", "abs", "exp", "exp2",
-                                   "log", "log2", "log10",
-                                   "sin", "cos", "tan",
-                                   "asin", "acos", "atan",
-                                   "sinh", "cosh", "tanh",
-                                   "floor", "ceil", "round", "trunc",
-                                   "sign" })
+        for (const char* name : { "sqrt", "cbrt", "abs", "exp", "exp2", "log", "log2", "log10",
+                                   "sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
+                                   "floor", "ceil", "round", "trunc", "sign" })
             m->define(Symbol(name, Type::fn({Type::f32()}, Type::f32()), IdentCtx::FuncDef, p));
  
         // Binary scalar ops
@@ -168,24 +220,23 @@ private:
         m->define(Symbol("e",       Type::f32(), IdentCtx::Def, p));
         m->define(Symbol("inf",     Type::f32(), IdentCtx::Def, p));
         m->define(Symbol("nan",     Type::f32(), IdentCtx::Def, p));
-        m->define(Symbol("epsilon", Type::f32(), IdentCtx::Def, p));   // machine epsilon
+        m->define(Symbol("epsilon", Type::f32(), IdentCtx::Def, p));   // machine epsilon, a very small number
  
         modules_["math"] = std::move(m);
     }
  
-    // ── tensor ───────────────────────────────────────────────────────────────
- 
+    // tensor, tensor operations
     void register_tensor()
     {
-        auto m  = std::make_shared<ModuleExports>();
+        auto m = std::make_shared<ModuleExports>();
         m->path = "tensor";
         Position p  = P();
  
-        TypePtr shape_t  = Type::array(Type::infer()); // accepts i32/i64 literals equally
-        TypePtr tf       = Type::tensor(Type::f32());
-        TypePtr ti       = Type::tensor(Type::infer());
+        TypePtr shape_t = Type::array(Type::infer()); // accepts i32/i64 literals equally
+        TypePtr tf = Type::tensor(Type::f32());
+        TypePtr ti = Type::tensor(Type::infer());
  
-        // ── Creation ─────────────────────────────────────────────────────────
+        // Creation
         m->define(Symbol("zeros",    Type::fn({shape_t},              tf),  IdentCtx::FuncDef, p));
         m->define(Symbol("ones",     Type::fn({shape_t},              tf),  IdentCtx::FuncDef, p));
         m->define(Symbol("full",     Type::fn({shape_t, Type::f32()}, tf),  IdentCtx::FuncDef, p));
@@ -197,7 +248,7 @@ private:
         m->define(Symbol("randint",  Type::fn({Type::i64(), Type::i64(), shape_t}, Type::tensor(Type::i64())), IdentCtx::FuncDef, p));
         m->define(Symbol("from_list",Type::fn({Type::array(Type::f32())}, tf), IdentCtx::FuncDef, p));
  
-        // ── Shape / layout ───────────────────────────────────────────────────
+        // Shape / layout
         m->define(Symbol("shape",     Type::fn({ti},              shape_t),         IdentCtx::FuncDef, p));
         m->define(Symbol("rank",      Type::fn({ti},              Type::i64()),     IdentCtx::FuncDef, p));
         m->define(Symbol("numel",     Type::fn({ti},              Type::i64()),     IdentCtx::FuncDef, p));
@@ -212,7 +263,7 @@ private:
         m->define(Symbol("clone",     Type::fn({ti},              ti),              IdentCtx::FuncDef, p));
         m->define(Symbol("cast",      Type::fn({ti, Type::infer()}, ti),           IdentCtx::FuncDef, p));
  
-        // ── Slicing / joining ────────────────────────────────────────────────
+        // Slicing / joining
         m->define(Symbol("slice",  Type::fn({ti, Type::i64(), Type::i64(), Type::i64()}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("select", Type::fn({ti, Type::i64(), Type::i64()}, ti),              IdentCtx::FuncDef, p));
         m->define(Symbol("cat",    Type::fn({Type::array(ti), Type::i64()}, ti),              IdentCtx::FuncDef, p));
@@ -223,16 +274,13 @@ private:
         m->define(Symbol("repeat", Type::fn({ti, shape_t}, ti),                               IdentCtx::FuncDef, p));
         m->define(Symbol("pad",    Type::fn({ti, shape_t, Type::f32()}, ti),                  IdentCtx::FuncDef, p));
  
-        // ── Reduction ────────────────────────────────────────────────────────
-        // Full-tensor collapse (no dim arg) → bare scalar, usable in comparisons.
-        for (const char* name : { "sum", "mean", "max", "min", "prod",
-                                   "norm", "std", "var", "median" })
+        // Reduction
+        // Full-tensor collapse (no dim arg) → bare scalar.
+        for (const char* name : { "sum", "mean", "max", "min", "prod", "norm", "std", "var", "median" })
             m->define(Symbol(name, Type::fn({ti}, Type::f32()), IdentCtx::FuncDef, p));
         // Dim-reducing variants → still a tensor (rank drops by 1).
-        for (const char* name : { "sum", "mean", "max", "min", "prod",
-                                   "norm", "std", "var", "median" })
-            m->define(Symbol((std::string(name) + "_dim").c_str(),
-                             Type::fn({ti, Type::i64()}, tf), IdentCtx::FuncDef, p));
+        for (const char* name : { "sum", "mean", "max", "min", "prod", "norm", "std", "var", "median" })
+            m->define(Symbol((std::string(name) + "_dim").c_str(), Type::fn({ti, Type::i64()}, tf), IdentCtx::FuncDef, p));
         m->define(Symbol("argmax",  Type::fn({ti, Type::i64()}, Type::tensor(Type::i64())), IdentCtx::FuncDef, p));
         m->define(Symbol("argmin",  Type::fn({ti, Type::i64()}, Type::tensor(Type::i64())), IdentCtx::FuncDef, p));
         // all/any full-collapse → bare bool for use in if-conditions.
@@ -245,22 +293,15 @@ private:
         m->define(Symbol("cumsum",  Type::fn({ti, Type::i64()}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("cumprod", Type::fn({ti, Type::i64()}, ti), IdentCtx::FuncDef, p));
  
-        // ── Element-wise maths ───────────────────────────────────────────────
-        for (const char* name : { "exp", "log", "log2", "log1p",
-                                   "sqrt", "rsqrt", "abs", "sign",
-                                   "sin", "cos", "tan",
-                                   "floor", "ceil", "round",
-                                   "neg", "reciprocal" })
+        // Element-wise maths
+        for (const char* name : { "exp", "log", "log2", "log1p", "sqrt", "rsqrt", "abs", "sign", "sin", "cos", "tan", "floor", "ceil", "round", "neg", "reciprocal" })
             m->define(Symbol(name, Type::fn({ti}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("pow",    Type::fn({ti, Type::f32()}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("clamp",  Type::fn({ti, Type::f32(), Type::f32()}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("lerp",   Type::fn({ti, ti, Type::f32()}, ti), IdentCtx::FuncDef, p));
  
-        // ── Activations ──────────────────────────────────────────────────────
-        for (const char* name : { "relu", "relu6", "silu", "gelu",
-                                   "sigmoid", "tanh", "softmax",
-                                   "log_softmax", "hardsigmoid",
-                                   "hardswish", "mish" })
+        // Activations (just generally used ones)
+        for (const char* name : { "relu", "relu6", "silu", "gelu", "sigmoid", "tanh", "softmax", "log_softmax", "hardsigmoid", "hardswish", "mish" })
             m->define(Symbol(name, Type::fn({ti}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("leaky_relu", Type::fn({ti, Type::f32()}, ti), IdentCtx::FuncDef, p));
         m->define(Symbol("elu",        Type::fn({ti, Type::f32()}, ti), IdentCtx::FuncDef, p));
@@ -268,7 +309,7 @@ private:
         m->define(Symbol("selu",       Type::fn({ti}, ti),              IdentCtx::FuncDef, p));
         m->define(Symbol("prelu",      Type::fn({ti, ti}, ti),          IdentCtx::FuncDef, p));
  
-        // ── Linear algebra ───────────────────────────────────────────────────
+        // Linear algebra operations
         m->define(Symbol("dot",       Type::fn({ti, ti},              Type::f32()), IdentCtx::FuncDef, p));
         m->define(Symbol("matmul",    Type::fn({ti, ti},              ti),          IdentCtx::FuncDef, p));
         m->define(Symbol("bmm",       Type::fn({ti, ti},              ti),          IdentCtx::FuncDef, p));
@@ -288,7 +329,7 @@ private:
         m->define(Symbol("cholesky",  Type::fn({ti},              ti),  IdentCtx::FuncDef, p));
         m->define(Symbol("solve",     Type::fn({ti, ti},          ti),  IdentCtx::FuncDef, p));
  
-        // ── Sorting / indexing ───────────────────────────────────────────────
+        // Sorting / indexing
         m->define(Symbol("sort",     Type::fn({ti, Type::i64()}, Type::array(ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("argsort",  Type::fn({ti, Type::i64()}, Type::tensor(Type::i64())), IdentCtx::FuncDef, p));
         m->define(Symbol("topk",     Type::fn({ti, Type::i64()}, Type::array(ti)), IdentCtx::FuncDef, p));
@@ -298,7 +339,7 @@ private:
         m->define(Symbol("nonzero",  Type::fn({ti}, Type::tensor(Type::i64())), IdentCtx::FuncDef, p));
         m->define(Symbol("masked_select", Type::fn({ti, Type::tensor(Type::bool_())}, ti), IdentCtx::FuncDef, p));
  
-        // ── Autodiff ─────────────────────────────────────────────────────────
+        // Autodiff
         m->define(Symbol("backward",    Type::fn({ti},        Type::void_()), IdentCtx::FuncDef, p));
         m->define(Symbol("grad",        Type::fn({ti},        ti),            IdentCtx::FuncDef, p));
         m->define(Symbol("no_grad",     Type::fn({ti},        ti),            IdentCtx::FuncDef, p));
@@ -309,24 +350,22 @@ private:
         modules_["tensor"] = std::move(m);
     }
  
-    // ── nn ───────────────────────────────────────────────────────────────────
- 
+    // neural network
     void register_nn()
     {
-        auto m  = std::make_shared<ModuleExports>();
+        auto m = std::make_shared<ModuleExports>();
         m->path = "nn";
-        Position p  = P();
+        Position p = P();
  
-        TypePtr ti  = Type::tensor(Type::infer());
-        TypePtr tf  = Type::tensor(Type::f32());
+        TypePtr ti = Type::tensor(Type::infer());
+        TypePtr tf = Type::tensor(Type::f32());
  
-        // ── Linear / embedding ───────────────────────────────────────────────
+        // Linear / embedding
         m->define(Symbol("linear",    Type::fn({Type::infer(), Type::infer(), Type::bool_()}, Type::fn({ti}, ti)),               IdentCtx::FuncDef, p));
         m->define(Symbol("embedding", Type::fn({Type::infer(), Type::infer()},                Type::fn({Type::tensor(Type::infer())}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("bilinear",  Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti, ti}, ti)),           IdentCtx::FuncDef, p));
  
-        // ── Convolutions ─────────────────────────────────────────────────────
-        // (in_ch, out_ch, kernel, stride, padding)
+        // Convolutions (in_ch, out_ch, kernel, stride, padding)
         m->define(Symbol("conv1d",           Type::fn({Type::infer(), Type::infer(), Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("conv2d",           Type::fn({Type::infer(), Type::infer(), Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("conv3d",           Type::fn({Type::infer(), Type::infer(), Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
@@ -334,8 +373,7 @@ private:
         m->define(Symbol("conv_transpose2d", Type::fn({Type::infer(), Type::infer(), Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("depthwise_conv2d", Type::fn({Type::infer(), Type::infer(), Type::infer()},                              Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
  
-        // ── Pooling ──────────────────────────────────────────────────────────
-        // (kernel_size, stride, padding)
+        // Pooling (kernel_size, stride, padding)
         m->define(Symbol("max_pool1d",          Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("max_pool2d",          Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("avg_pool1d",          Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
@@ -343,33 +381,29 @@ private:
         m->define(Symbol("adaptive_avg_pool2d", Type::fn({Type::infer(), Type::infer()},                Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("global_avg_pool",     Type::fn({},                                            Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
  
-        // ── Normalisation ────────────────────────────────────────────────────
+        // Normalisation
         m->define(Symbol("batch_norm",    Type::fn({Type::infer()},                          Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("layer_norm",    Type::fn({Type::array(Type::infer())},              Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("group_norm",    Type::fn({Type::infer(), Type::infer()},            Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("instance_norm", Type::fn({Type::infer()},                          Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("rms_norm",      Type::fn({Type::array(Type::infer())},              Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
  
-        // ── Dropout / regularisation ─────────────────────────────────────────
-        // (p = drop probability)
+        // Dropout / regularisation (p = drop probability)
         m->define(Symbol("dropout",    Type::fn({Type::f32()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("dropout2d",  Type::fn({Type::f32()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("alpha_dropout", Type::fn({Type::f32()}, Type::fn({ti}, ti)), IdentCtx::FuncDef, p));
  
-        // ── Recurrent layers ─────────────────────────────────────────────────
-        // (input_size, hidden_size, num_layers)
+        // Recurrent layers (input_size, hidden_size, num_layers)
         m->define(Symbol("rnn",  Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti, ti},              Type::array(ti))), IdentCtx::FuncDef, p));
         m->define(Symbol("lstm", Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti, Type::array(ti)}, Type::array(ti))), IdentCtx::FuncDef, p));
         m->define(Symbol("gru",  Type::fn({Type::infer(), Type::infer(), Type::infer()}, Type::fn({ti, ti},              Type::array(ti))), IdentCtx::FuncDef, p));
  
-        // ── Attention ────────────────────────────────────────────────────────
-        // (embed_dim, num_heads)
+        // Attention (embed_dim, num_heads)
         m->define(Symbol("multi_head_attention",          Type::fn({Type::infer(), Type::infer()}, Type::fn({ti, ti, ti}, ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("scaled_dot_product_attention",  Type::fn({ti, ti, ti}, ti),                                          IdentCtx::FuncDef, p));
  
-        // ── Loss functions ───────────────────────────────────────────────────
-        // All losses collapse to a bare f32 scalar — directly usable in
-        // comparisons (loss > threshold) and optimiser step calls.
+        // Loss functions
+        // All losses collapse to a bare f32 scalar
         m->define(Symbol("mse_loss",          Type::fn({ti, ti},                    Type::f32()), IdentCtx::FuncDef, p));
         m->define(Symbol("mae_loss",          Type::fn({ti, ti},                    Type::f32()), IdentCtx::FuncDef, p));
         m->define(Symbol("cross_entropy",     Type::fn({ti, ti},                    Type::f32()), IdentCtx::FuncDef, p));
@@ -386,20 +420,18 @@ private:
         modules_["nn"] = std::move(m);
     }
  
-    // ── optim ────────────────────────────────────────────────────────────────
- 
+    // optim, for regularization usage (tensorflow)
     void register_optim()
     {
-        auto m  = std::make_shared<ModuleExports>();
+        auto m = std::make_shared<ModuleExports>();
         m->path = "optim";
         Position p  = P();
  
         TypePtr params_t = Type::array(Type::tensor(Type::infer()));
         // All optimiser constructors return a step callable.
-        // step accepts a bare f32 loss (matching nn loss return types).
-        TypePtr step_fn  = Type::fn({Type::f32()}, Type::void_());
+        TypePtr step_fn = Type::fn({Type::f32()}, Type::void_());
  
-        // ── First-order ──────────────────────────────────────────────────────
+        // First-order optim methods
         // SGD(params, lr, momentum=0, weight_decay=0)
         m->define(Symbol("sgd",     Type::fn({params_t, Type::f32(), Type::f32(), Type::f32()}, step_fn), IdentCtx::FuncDef, p));
         // Adam(params, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0)
@@ -421,7 +453,7 @@ private:
         // RAdam(params, lr, beta1, beta2, weight_decay)
         m->define(Symbol("radam",   Type::fn({params_t, Type::f32(), Type::f32(), Type::f32(), Type::f32()}, step_fn), IdentCtx::FuncDef, p));
  
-        // ── Learning-rate schedulers ─────────────────────────────────────────
+        // Learning-rate schedulers
         // Each scheduler takes an optimiser step-fn and returns an updated step-fn.
         TypePtr sched_fn = Type::fn({step_fn}, step_fn);
         m->define(Symbol("step_lr",        Type::fn({step_fn, Type::i64(), Type::f32()}, step_fn), IdentCtx::FuncDef, p));
@@ -431,7 +463,7 @@ private:
         m->define(Symbol("cyclic_lr",      Type::fn({step_fn, Type::f32(), Type::f32()}, step_fn), IdentCtx::FuncDef, p));
         m->define(Symbol("one_cycle_lr",   Type::fn({step_fn, Type::f32(), Type::i64()}, step_fn), IdentCtx::FuncDef, p));
  
-        // ── Gradient utilities ───────────────────────────────────────────────
+        // Gradient utilities
         m->define(Symbol("clip_grad_norm",  Type::fn({params_t, Type::f32()}, Type::f32()), IdentCtx::FuncDef, p));
         m->define(Symbol("clip_grad_value", Type::fn({params_t, Type::f32()}, Type::void_()), IdentCtx::FuncDef, p));
         m->define(Symbol("zero_grad",       Type::fn({params_t}, Type::void_()), IdentCtx::FuncDef, p));
@@ -439,20 +471,18 @@ private:
         modules_["optim"] = std::move(m);
     }
  
-    // ── data ─────────────────────────────────────────────────────────────────
- 
+    // data, for dataset processing (scikit-learn)
     void register_data()
     {
-        auto m  = std::make_shared<ModuleExports>();
+        auto m = std::make_shared<ModuleExports>();
         m->path = "data";
         Position p  = P();
  
-        TypePtr ti      = Type::tensor(Type::infer());
-        TypePtr batch_t = Type::array(ti);             // a batch = list of tensors
+        TypePtr ti = Type::tensor(Type::infer());
+        TypePtr batch_t = Type::array(ti); // a batch = list of tensors
         // DataLoader is represented as fn() -> batch (an iterator factory).
         TypePtr loader_t = Type::fn({}, batch_t);
  
-        // ── Dataset construction ─────────────────────────────────────────────
         // tensor_dataset([features_tensor, labels_tensor]) -> dataset handle
         TypePtr dataset_t = Type::array(ti);
         m->define(Symbol("tensor_dataset", Type::fn({batch_t}, dataset_t), IdentCtx::FuncDef, p));
@@ -460,7 +490,7 @@ private:
         m->define(Symbol("image_dataset",  Type::fn({Type::str_()}, dataset_t), IdentCtx::FuncDef, p));
         m->define(Symbol("hdf5_dataset",   Type::fn({Type::str_(), Type::str_()}, dataset_t), IdentCtx::FuncDef, p));
  
-        // ── DataLoader ───────────────────────────────────────────────────────
+        // DataLoader
         m->define(Symbol("dataloader",      Type::fn({dataset_t, Type::infer(), Type::bool_(), Type::infer()}, loader_t), IdentCtx::FuncDef, p));
         m->define(Symbol("next_batch",      Type::fn({loader_t}, batch_t),           IdentCtx::FuncDef, p));
         m->define(Symbol("has_next",        Type::fn({loader_t}, Type::bool_()),     IdentCtx::FuncDef, p));
@@ -468,7 +498,7 @@ private:
         m->define(Symbol("dataset_len",     Type::fn({dataset_t}, Type::infer()),    IdentCtx::FuncDef, p));
         m->define(Symbol("num_batches",     Type::fn({loader_t},  Type::infer()),    IdentCtx::FuncDef, p));
  
-        // ── Transforms ───────────────────────────────────────────────────────
+        // Transforms
         TypePtr xform_t = Type::fn({ti}, ti);
         m->define(Symbol("normalize",    Type::fn({ti, ti},                              xform_t), IdentCtx::FuncDef, p));
         m->define(Symbol("random_crop",  Type::fn({Type::infer(), Type::infer()},        xform_t), IdentCtx::FuncDef, p));
@@ -477,27 +507,25 @@ private:
         m->define(Symbol("to_tensor",    Type::fn({},                                    xform_t), IdentCtx::FuncDef, p));
         m->define(Symbol("compose",      Type::fn({Type::array(xform_t)},               xform_t), IdentCtx::FuncDef, p));
  
-        // ── Splitting ────────────────────────────────────────────────────────
+        // Splitting
         m->define(Symbol("train_test_split", Type::fn({dataset_t, Type::f32()},   Type::array(dataset_t)), IdentCtx::FuncDef, p));
         m->define(Symbol("kfold",            Type::fn({dataset_t, Type::infer()}, Type::array(dataset_t)), IdentCtx::FuncDef, p));
  
         modules_["data"] = std::move(m);
     }
  
-    // ── parallel ─────────────────────────────────────────────────────────────
- 
+    // parallel and distribution programming purposes
     void register_parallel()
     {
-        auto m  = std::make_shared<ModuleExports>();
+        auto m = std::make_shared<ModuleExports>();
         m->path = "parallel";
         Position p  = P();
  
-        TypePtr ti      = Type::tensor(Type::infer());
-        // A "work item" is any zero-argument callable returning void.
-        TypePtr task_t  = Type::fn({}, Type::void_());
-        TypePtr tasks_t = Type::array(task_t);
+        TypePtr ti = Type::tensor(Type::infer());
+        TypePtr task_t = Type::fn({}, Type::void_());
+        TypePtr tasks_t = Type::array(task_t); // list of task
  
-        // ── Thread dispatch ──────────────────────────────────────────────────
+        // Thread dispatch
         m->define(Symbol("spawn",           Type::fn({task_t},                                                                    Type::void_()), IdentCtx::FuncDef, p));
         m->define(Symbol("parallel_for",    Type::fn({Type::infer(), Type::fn({Type::infer()}, Type::void_())},                   Type::void_()), IdentCtx::FuncDef, p));
         m->define(Symbol("parallel_map",    Type::fn({Type::array(Type::infer()), Type::fn({Type::infer()}, Type::infer())},      Type::array(Type::infer())), IdentCtx::FuncDef, p));
@@ -505,7 +533,7 @@ private:
         m->define(Symbol("num_threads",     Type::fn({},                                                                          Type::infer()), IdentCtx::FuncDef, p));
         m->define(Symbol("set_num_threads", Type::fn({Type::infer()},                                                             Type::void_()), IdentCtx::FuncDef, p));
  
-        // ── Device management ────────────────────────────────────────────────
+        // Device management
         // device("cpu" | "cuda:0" | "metal" | …) -> opaque device handle (str tag)
         m->define(Symbol("device",       Type::fn({Type::str_()}, Type::str_()), IdentCtx::FuncDef, p));
         m->define(Symbol("to_device",    Type::fn({ti, Type::str_()}, ti),       IdentCtx::FuncDef, p));
@@ -514,7 +542,7 @@ private:
         m->define(Symbol("is_available", Type::fn({Type::str_()}, Type::bool_()), IdentCtx::FuncDef, p));
         m->define(Symbol("synchronize",  Type::fn({Type::str_()}, Type::void_()), IdentCtx::FuncDef, p));
  
-        // ── Data-parallel tensor ops ─────────────────────────────────────────
+        // Data-parallel tensor ops (MPI-inspired)
         // scatter across devices, gather back
         m->define(Symbol("scatter",          Type::fn({ti, Type::array(Type::str_())}, Type::array(ti)), IdentCtx::FuncDef, p));
         m->define(Symbol("gather",           Type::fn({Type::array(ti), Type::str_()}, ti),              IdentCtx::FuncDef, p));
@@ -524,12 +552,12 @@ private:
         m->define(Symbol("all_gather",       Type::fn({Type::array(ti)},              Type::array(ti)),  IdentCtx::FuncDef, p));
         m->define(Symbol("reduce_scatter",   Type::fn({Type::array(ti), Type::str_()}, Type::array(ti)), IdentCtx::FuncDef, p));
  
-        // ── Shared memory / IPC ──────────────────────────────────────────────
+        // Shared memory / IPC
         m->define(Symbol("shared_tensor",    Type::fn({ti},                Type::str_()), IdentCtx::FuncDef, p));  // returns shm key
         m->define(Symbol("attach_tensor",    Type::fn({Type::str_()},      ti),           IdentCtx::FuncDef, p));
         m->define(Symbol("detach_shared",    Type::fn({Type::str_()},      Type::void_()), IdentCtx::FuncDef, p));
  
-        // ── Barriers / synchronisation primitives ────────────────────────────
+        // Barriers / synchronisation primitives
         m->define(Symbol("barrier",          Type::fn({},                  Type::void_()), IdentCtx::FuncDef, p));
         m->define(Symbol("lock",             Type::fn({Type::str_()},      Type::void_()), IdentCtx::FuncDef, p));
         m->define(Symbol("unlock",           Type::fn({Type::str_()},      Type::void_()), IdentCtx::FuncDef, p));

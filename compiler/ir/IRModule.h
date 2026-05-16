@@ -9,15 +9,12 @@
  
 namespace ir {
  
-// ─── BasicBlock ──────────────────────────────────────────────────────────────
- 
-/// A maximal straight-line sequence of instructions ending in a terminator
-/// (BranchInst, CondBranchInst, or ReturnInst).
+/// A maximal straight-line sequence of instructions ending in a terminator (BranchInst, CondBranchInst, or ReturnInst).
 struct BasicBlock
 {
-    std::string            label;       ///< e.g. "entry", "if.true", "loop.body"
-    std::vector<InstPtr>   insts;       ///< ordered instruction list
-    Function*              parent = nullptr;
+    std::string label; // e.g. "entry", "if.true", "loop.body"
+    std::vector<InstPtr> insts; // ordered instruction list
+    Function* parent = nullptr;
  
     /// Predecessor blocks (populated by CFG-building pass).
     std::vector<BasicBlock*> preds;
@@ -26,8 +23,7 @@ struct BasicBlock
  
     explicit BasicBlock(std::string label) : label(std::move(label)) {}
  
-    // ── Instruction emission ─────────────────────────────────────────────────
- 
+    // Instruction emission
     template<typename T, typename... Args>
     T* emit(Args&&... args)
     {
@@ -42,35 +38,24 @@ struct BasicBlock
     {
         if (insts.empty()) return false;
         auto* last = insts.back().get();
-        return dynamic_cast<BranchInst*>(last)     ||
-               dynamic_cast<CondBranchInst*>(last) ||
-               dynamic_cast<ReturnInst*>(last);
+        return dynamic_cast<BranchInst*>(last) || dynamic_cast<CondBranchInst*>(last) || dynamic_cast<ReturnInst*>(last);
     }
  
-    Instruction* terminator()
-    {
-        return is_terminated() ? insts.back().get() : nullptr;
-    }
+    Instruction* terminator() { return is_terminated() ? insts.back().get() : nullptr; }
 };
  
-// ─── Function ────────────────────────────────────────────────────────────────
- 
-/// Represents a compiled fn or async fn definition.
+/// Function represents a compiled fn or async fn definition.
 struct Function : Value
 {
     std::vector<std::shared_ptr<Argument>> params;
     std::vector<std::shared_ptr<BasicBlock>> blocks;
  
-    bool is_async    = false;
-    bool is_exported = false;   ///< true for top-level exported symbols
- 
+    bool is_async = false;
+    bool is_exported = false; // true for top-level exported symbols
     IRModule* parent_module = nullptr;
+    Function(std::string name, TypePtr fn_type): Value(std::move(name), std::move(fn_type)) {}
  
-    Function(std::string name, TypePtr fn_type)
-        : Value(std::move(name), std::move(fn_type)) {}
- 
-    // ── Block management ─────────────────────────────────────────────────────
- 
+    // Block management
     BasicBlock* entry()
     {
         assert(!blocks.empty() && "Function has no blocks");
@@ -91,18 +76,15 @@ struct Function : Value
         return add_block("entry");
     }
  
-    // ── Parameter management ─────────────────────────────────────────────────
- 
+    // Parameter management
     Argument* add_param(std::string name, TypePtr type)
     {
-        auto arg = std::make_shared<Argument>(
-            std::move(name), std::move(type), params.size());
+        auto arg = std::make_shared<Argument>(std::move(name), std::move(type), params.size());
         params.push_back(std::move(arg));
         return params.back().get();
     }
  
-    // ── Value lookup (by name, for IR builder use) ───────────────────────────
- 
+    // Value lookup (by name, for IR builder use)
     Value* find_value(const std::string& name) const
     {
         for (auto& p : params)
@@ -114,30 +96,22 @@ struct Function : Value
     }
 };
  
-// ─── IRModule ────────────────────────────────────────────────────────────────
- 
-/// Top-level container for a compiled .tcc source file.
+/// It's the top-level container for a compiled .tcc source file.
 /// One IRModule per compilation unit; linked together by the import resolver.
 struct IRModule
 {
-    std::string source_path;   ///< absolute path of the originating .tcc file
- 
-    std::vector<std::shared_ptr<Function>>    functions;
-    std::vector<std::shared_ptr<Value>>       globals;    ///< global let bindings
- 
+    std::string source_path; // absolute path of the originating .tcc file
+    std::vector<std::shared_ptr<Function>> functions;
+    std::vector<std::shared_ptr<Value>> globals; // global let bindings
+    std::unordered_map<std::string, TypePtr> named_types; // user-defined struct types
     /// Modules imported by this one (resolved by ImportResolver).
     std::vector<IRModule*> imports;
- 
     explicit IRModule(std::string path) : source_path(std::move(path)) {}
  
-    // ── Function management ──────────────────────────────────────────────────
- 
-    Function* add_function(std::string name, TypePtr fn_type,
-                           bool is_async = false)
+    // Function management
+    Function* add_function(std::string name, TypePtr fn_type, bool is_async = false)
     {
-        for (auto& fn : functions) {
-            if (fn->name == name) return fn.get();
-        }
+        for (auto& fn : functions) if (fn->name == name) return fn.get();
         auto fn = std::make_shared<Function>(std::move(name), std::move(fn_type));
         fn->is_async = is_async;
         fn->parent_module = this;
@@ -152,8 +126,7 @@ struct IRModule
         return nullptr;
     }
  
-    // ── Global value management ──────────────────────────────────────────────
- 
+    // Global value management
     Value* add_global(std::shared_ptr<Value> val)
     {
         globals.push_back(std::move(val));
@@ -166,6 +139,15 @@ struct IRModule
             if (g->name == name) return g.get();
         return nullptr;
     }
+
+    // Add a user-defined struct type to the module's named_types registry
+    void add_named_type(const std::string& name, TypePtr type) { named_types[std::move(name)] = std::move(type); }
+    
+    TypePtr find_type(const std::string& name) const {
+        auto it = named_types.find(name);
+        return (it != named_types.end()) ? it->second : nullptr;
+    }
+
 };
  
 } // namespace ir

@@ -11,8 +11,7 @@
 struct ParseError : public std::runtime_error
 {
     Position pos;
-    ParseError(const std::string& msg, Position p)
-        : std::runtime_error(msg), pos(p) {}
+    ParseError(const std::string& msg, Position p) : std::runtime_error(msg), pos(p) {}
 };
 
 class Parser
@@ -23,17 +22,17 @@ public:
 
 private:
     Lexer& lexer;
-    Token  current;
-    Token  previous;
+    Token current;
+    Token previous;
 
-    std::unordered_set<std::string> active_generic_names;
-    std::optional<GenericParams> last_tensor_gp;
+    std::unordered_set<std::string> active_generic_names; // to detect duplicate generic parameter names in the same scope
+    std::optional<GenericParams> last_tensor_gp; // to track generic params of the last parsed tensor for parsing shape annotations on literals
 
-    void      advance();
-    bool      check(TokenKind k) const;
-    bool      match(TokenKind k);
-    void      expect(TokenKind k, const std::string& msg);
-    void      consumeOptionalSemicolon();
+    void advance();
+    bool check(TokenKind k) const;
+    bool match(TokenKind k);
+    void expect(TokenKind k, const std::string& msg);
+    void consumeOptionalSemicolon();
     ParseError error(const std::string& msg) const;
 
     StmtPtr parseStatement();
@@ -88,12 +87,12 @@ private:
     ExprPtr parseTupleLit();
     ExprPtr parseStructLit(const std::string& name, Position p);
     std::vector<std::vector<ExprPtr>> parseTensorRows();
-    TyKind       parseType();
+    TyKind parseType();
     GenericParams parseGenericParams();
     std::vector<std::string> parseGenericNames();
-    std::vector<ExprPtr>  parseExprList(TokenKind terminator);
-    std::vector<Ident>    parseParamList();
-    MatchArm              parseMatchArm();
+    std::vector<ExprPtr> parseExprList(TokenKind terminator);
+    std::vector<Ident> parseParamList();
+    MatchArm parseMatchArm();
     StmtPtr makeStmt(StmtKind kind, Position pos);
     ExprPtr makeExpr(ExprKind kind, Position pos);
 };

@@ -1,3 +1,6 @@
+// Build this using: g++ -std=c++17 -I./compiler/ -o cli/tensorc cli/tensorc.cpp compiler/lexer/Lexer.cpp compiler/parser/Parser.cpp compiler/ast/Type.cpp
+// Example usage: cli\tensorc.exe .\cli\test_files\test_1.tcc --print-ir
+
 #include <fstream>
 #include <string>
 #include <iostream>
@@ -12,8 +15,6 @@
 #include "../compiler/io/io.h"
 #include "../compiler/ir/ir.h"
 
-// ── helpers ──────────────────────────────────────────────────────────────────
- 
 static void print_usage()
 {
     std::cout
@@ -26,15 +27,12 @@ static void print_usage()
         << "  tensorc hello_world.tcc --print-ir\n";
 }
  
-// ── entry point ──────────────────────────────────────────────────────────────
- 
 int main(int argc, char** argv)
 {
     if (argc < 2) {
         print_usage();
         return 1;
     }
- 
     std::string first_arg = argv[1];
     bool print_ir = false;
 
@@ -61,16 +59,16 @@ int main(int argc, char** argv)
     try {
         auto t0 = std::chrono::high_resolution_clock::now();
  
-        // ── 1. I/O phase ─────────────────────────────────────────────────────
+        // I/O phase: read source file into memory
         // FileHandler owns the source text and its path.
         // Throws io::TensorCError (caught below) on missing/unreadable files.
         io::FileHandler fh(filepath);
         const std::string& source = fh.contents();
  
-        // ── 2. Lexical analysis ───────────────────────────────────────────────
+        // Lexical analysis
         Lexer lexer(source);
  
-        // ── 3. Syntax analysis ────────────────────────────────────────────────
+        // Syntax analysis
         Parser parser(lexer);
         auto program = parser.parse();
  
@@ -79,17 +77,16 @@ int main(int argc, char** argv)
             return 1;
         }
  
-        // ── 4. Semantic analysis ──────────────────────────────────────────────
-        // BuiltinRegistry is constructed once here and moved into the analyser,
-        // keeping ownership explicit at the top of the compilation pipeline.
+        // Semantic analysis
+        // BuiltinRegistry is constructed once here and moved into the analyser, keeping ownership explicit at the top of the compilation pipeline.
         io::BuiltinRegistry builtins = io::BuiltinRegistry::with_builtins();
-        SemanticAnalyzer sema(std::move(builtins));
+        SemanticAnalyzer sema(builtins);
         sema.validate(program);
 
+        // IR generation
         ir::IRBuilder builder;
         auto module = std::make_unique<ir::IRModule>(filepath);
-        builder.build(program, module.get());
-
+        builder.build(program, module.get(), builtins);
         int fusions = ir::PassPipeline::run(*module);
  
         auto t1 = std::chrono::high_resolution_clock::now();
@@ -104,7 +101,7 @@ int main(int argc, char** argv)
         }
  
     } catch (const io::TensorCError& e) {
-        // Structured compiler diagnostics — already formatted with source spans.
+        // Structured compiler diagnostics, already formatted with source spans.
         std::cerr << e.what() << "\n";
         return 1;
     } catch (const std::exception& e) {

@@ -9,15 +9,17 @@
 #include "ASTNode.h"
 #include "Type.h"
 
+// Symbol represents an identifier in the program, along with its type, context (definition, reference, parameter, etc.), and other metadata. The SymbolTable manages a stack of scopes, allowing for nested variable/function definitions and lookups.
 struct Symbol {
     std::string name;
-    TypePtr      type;
-    IdentCtx    ctx;
-    Position    pos;
+    TypePtr type;
+    IdentCtx ctx;
+    Position pos;
     bool is_parallel_safe = true;
     bool is_mutable = true;
     bool requires_grad = false; 
     Symbol(std::string n, TypePtr t, IdentCtx c, Position p = {}) : name(std::move(n)), type(t), ctx(c), pos(p) {}
+
     bool is_infer() const { return !type || type->is_infer(); }
     const std::vector<Dim>& shape() const {
         static const std::vector<Dim> empty;
@@ -37,6 +39,7 @@ struct Symbol {
     }
 };
 
+// Scope represents a single level of variable/function definitions. It maps identifier names to Symbols. The SymbolTable manages a stack of Scopes to allow for nested definitions and lookups.
 class Scope {
 public:
     Symbol* define(const Symbol& sym) {
@@ -58,11 +61,7 @@ class SymbolTable {
 public:
     SymbolTable() { pushScope(); }
     void pushScope() { scopes.push_back(std::make_unique<Scope>()); }
-    void popScope() {
-        if (scopes.size() > 1) {
-            scopes.pop_back();
-        }
-    }
+    void popScope() { if (scopes.size() > 1) { scopes.pop_back(); } }
     Symbol* define(const Symbol& sym) {
         Symbol* created = scopes.back()->define(sym);
         if (!created) {

@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <unordered_set>
 
+// Map of reserved keywords to their corresponding token kinds
 static const std::unordered_map<std::string, TokenKind> KEYWORDS = {
     // control flow
     { "if",       TokenKind::KW_IF       },
@@ -50,10 +51,7 @@ static const std::unordered_map<std::string, TokenKind> KEYWORDS = {
     { "false",    TokenKind::KW_FALSE    },
 };
 
-static bool isBraceCollectionOpener(TokenKind k)
-{
-    return k == TokenKind::KW_MAP;
-}
+static bool isBraceCollectionOpener(TokenKind k) { return k == TokenKind::KW_MAP; }
 
 static LexContext bracketContextFor(TokenKind k)
 {
@@ -69,7 +67,7 @@ static LexContext bracketContextFor(TokenKind k)
     }
 }
 
-Lexer::Lexer(const std::string& src)
+Lexer::Lexer(const std::string& src) // constructor method
 {
     source = src;
     index = 0;
@@ -80,17 +78,9 @@ Lexer::Lexer(const std::string& src)
 
 void Lexer::nextChar()
 {
-    if(current == '\0')
-        return;
-    if(current == '\n')
-    {
-        pos.line++;
-        pos.column = 1;
-    }
-    else
-    {
-        pos.column++;
-    }
+    if(current == '\0') return; // already at end of input
+    if(current == '\n') { pos.line++; pos.column = 1; } // start a new line
+    else { pos.column++; }
     index++;
     current = (index >= source.size()) ? '\0' : source[index];
 }
@@ -101,43 +91,25 @@ char Lexer::peekChar() const
     return (next >= source.size()) ? '\0' : source[next];
 }
 
-bool Lexer::eof() const
-{
-    return current == '\0';
-}
+bool Lexer::eof() const { return current == '\0'; }
 
-void Lexer::skipWhitespace()
-{
-    while(std::isspace(static_cast<unsigned char>(current)))
-        nextChar();
-}
+void Lexer::skipWhitespace() { while(std::isspace(static_cast<unsigned char>(current))) nextChar(); }
 
 void Lexer::skipComment()
 {
     while (true)
     {
-        if (current == '/' && peekChar() == '/')      // single-line comment
-        {
-            while (current != '\n' && !eof())
-                nextChar();
-        }
+        if (current == '/' && peekChar() == '/') { while (current != '\n' && !eof()) nextChar(); } // single-line comment
         else if (current == '/' && peekChar() == '*') // block comment  /* ... */
         {
             nextChar(); nextChar();
             while (!eof())
             {
-                if (current == '*' && peekChar() == '/')
-                {
-                    nextChar(); nextChar();
-                    break;
-                }
+                if (current == '*' && peekChar() == '/') { nextChar(); nextChar(); break; }
                 nextChar();
             }
         }
-        else
-        {
-            break;
-        }
+        else { break; }
         skipWhitespace(); // eat any space between consecutive comments
     }
 }
@@ -331,22 +303,11 @@ Token Lexer::lexOperator()
     }
 }
 
-LexContext Lexer::currentContext() const
-{
-    return context_stack.empty() ? LexContext::DEFAULT : context_stack.back();
-}
+LexContext Lexer::currentContext() const { return context_stack.empty() ? LexContext::DEFAULT : context_stack.back(); }
 
-void Lexer::pushContext(LexContext ctx)
-{
-    context_stack.push_back(ctx);
-}
+void Lexer::pushContext(LexContext ctx) { context_stack.push_back(ctx); }
 
-void Lexer::popContext()
-{
-    if (!context_stack.empty())
-        context_stack.pop_back();
-}
-
+void Lexer::popContext() { if (!context_stack.empty()) context_stack.pop_back(); }
 
 Token Lexer::makeToken(TokenKind kind, const std::string& value, Position start)
 {
@@ -363,11 +324,9 @@ Token Lexer::nextToken()
     // context-sensitive '{'. Map{...} → MAP context; anything else → DEFAULT (plain block)
     if (current == '{')
     {
-        Position   start = pos;
+        Position start = pos;
         nextChar();
-        LexContext ctx  = isBraceCollectionOpener(last_token_kind)
-                        ? LexContext::MAP
-                        : LexContext::DEFAULT;
+        LexContext ctx = isBraceCollectionOpener(last_token_kind) ? LexContext::MAP : LexContext::DEFAULT;
         pushContext(ctx);
         return makeToken(TokenKind::LBRACE, "{", start);
     }
@@ -384,10 +343,8 @@ Token Lexer::nextToken()
         Position start = pos;
         nextChar();
         // '[' directly after Tensor keyword → tensor literal context
-        LexContext ctx = (last_token_kind == TokenKind::KW_TENSOR ||
-                          last_token_kind == TokenKind::RPAREN)   // Tensor#(...)[
-                        ? LexContext::TENSOR
-                        : LexContext::ARRAY;
+        LexContext ctx = (last_token_kind == TokenKind::KW_TENSOR || last_token_kind == TokenKind::RPAREN)   // Tensor#(...)[
+                        ? LexContext::TENSOR : LexContext::ARRAY;
         pushContext(ctx);
         return makeToken(TokenKind::LBRACKET, "[", start);
     }
@@ -403,9 +360,7 @@ Token Lexer::nextToken()
     {
         Position start = pos;
         nextChar();
-        TokenKind kind = (currentContext() == LexContext::TENSOR)
-                       ? TokenKind::ROW_SEP
-                       : TokenKind::SEMICOLON;
+        TokenKind kind = (currentContext() == LexContext::TENSOR) ? TokenKind::ROW_SEP : TokenKind::SEMICOLON;
         return makeToken(kind, ";", start);
     }
     // standard dispatch
@@ -420,17 +375,18 @@ Token Lexer::nextToken()
 
 Token Lexer::peekToken()
 {
-    const size_t        savedIndex        = index;
-    const char          savedCurrent      = current;
-    const Position      savedPos          = pos;
-    const auto          savedContextStack = context_stack;
-    const TokenKind     savedLastKind     = last_token_kind;
+    const size_t savedIndex = index;
+    const char savedCurrent = current;
+    const Position savedPos = pos;
+    const auto savedContextStack = context_stack;
+    const TokenKind savedLastKind = last_token_kind;
 
     Token tok = nextToken();
 
-    index         = savedIndex;
-    current       = savedCurrent;
-    pos           = savedPos;
+    // Restore lexer state so that peek does not consume the token
+    index = savedIndex;
+    current = savedCurrent;
+    pos = savedPos;
     context_stack = savedContextStack;
     last_token_kind = savedLastKind;
 
