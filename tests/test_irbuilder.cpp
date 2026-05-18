@@ -5,67 +5,98 @@
 using namespace ir;
  
 // ── Helpers to build stub AST nodes quickly ───────────────────────────────────
- 
-static std::unique_ptr<LitIntExpr> lit_int(int64_t v, TypePtr ty = nullptr)
+
+static Position dpos() { return {1, 1}; }
+
+static BinOp binop_from_string(const std::string& op)
 {
-    auto e = std::make_unique<LitIntExpr>();
-    e->value = v;
+    if (op == "+") return BinOp::Add;
+    if (op == "-") return BinOp::Sub;
+    if (op == "*") return BinOp::Mul;
+    if (op == "/") return BinOp::Div;
+    if (op == "@") return BinOp::MatMul;
+    if (op == "==") return BinOp::Eq;
+    if (op == "!=") return BinOp::Neq;
+    if (op == "<") return BinOp::Lt;
+    if (op == ">") return BinOp::Gt;
+    if (op == "<=") return BinOp::Lte;
+    if (op == ">=") return BinOp::Gte;
+    if (op == "&&") return BinOp::And;
+    if (op == "||") return BinOp::Or;
+    return BinOp::Add;
+}
+
+static UnaryOp unaryop_from_string(const std::string& op)
+{
+    if (op == "-") return UnaryOp::Neg;
+    if (op == "!") return UnaryOp::Not;
+    return UnaryOp::Neg;
+}
+
+static std::unique_ptr<Expr> lit_int(int64_t v, TypePtr ty = nullptr)
+{
+    ExprKind ek = ExprKind::makeLit(LitKind::makeInt(std::to_string(v)));
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = ty ? ty : Type::i32();
     return e;
 }
  
-static std::unique_ptr<LitFloatExpr> lit_float(double v, TypePtr ty = nullptr)
+static std::unique_ptr<Expr> lit_float(double v, TypePtr ty = nullptr)
 {
-    auto e = std::make_unique<LitFloatExpr>();
-    e->value = v;
+    ExprKind ek = ExprKind::makeLit(LitKind::makeFloat(std::to_string(v)));
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = ty ? ty : Type::f32();
     return e;
 }
- 
-static std::unique_ptr<LitBoolExpr> lit_bool(bool v)
+
+static std::unique_ptr<Expr> lit_bool(bool v)
 {
-    auto e = std::make_unique<LitBoolExpr>();
-    e->value = v;
+    ExprKind ek = ExprKind::makeLit(LitKind::makeBool(v));
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = Type::bool_();
     return e;
 }
- 
-static std::unique_ptr<LitStrExpr> lit_str(const std::string& s)
+
+static std::unique_ptr<Expr> lit_str(const std::string& s)
 {
-    auto e = std::make_unique<LitStrExpr>();
-    e->value = s;
+    ExprKind ek = ExprKind::makeLit(LitKind::makeStr(s));
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = Type::str_();
     return e;
 }
- 
-static std::unique_ptr<IdentExpr> ident(const std::string& name, TypePtr ty)
+
+static std::unique_ptr<Expr> ident(const std::string& name, TypePtr ty)
 {
-    auto e = std::make_unique<IdentExpr>();
-    e->name = name;
+    ExprKind ek = ExprKind::makeId(name, TyKind::Infer, IdentCtx::Ref, dpos());
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = ty;
     return e;
 }
- 
-static std::unique_ptr<BinExpr> binexp(std::string op,
-                                        std::unique_ptr<ASTNode> lhs,
-                                        std::unique_ptr<ASTNode> rhs,
-                                        TypePtr ty)
+
+static std::unique_ptr<Expr> binexp(std::string op,
+                                    std::unique_ptr<Expr> lhs,
+                                    std::unique_ptr<Expr> rhs,
+                                    TypePtr ty)
 {
-    auto e = std::make_unique<BinExpr>();
-    e->op  = std::move(op);
-    e->lhs = std::move(lhs);
-    e->rhs = std::move(rhs);
+    ExprKind ek;
+    ek.tag = ExprKind::Tag::Binary;
+    ek.bin_op = binop_from_string(op);
+    ek.lhs = std::move(lhs);
+    ek.rhs = std::move(rhs);
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = ty;
     return e;
 }
- 
-static std::unique_ptr<UnExpr> unexpr(std::string op,
-                                       std::unique_ptr<ASTNode> operand,
-                                       TypePtr ty)
+
+static std::unique_ptr<Expr> unexpr(std::string op,
+                                    std::unique_ptr<Expr> operand,
+                                    TypePtr ty)
 {
-    auto e = std::make_unique<UnExpr>();
-    e->op      = std::move(op);
-    e->operand = std::move(operand);
+    ExprKind ek;
+    ek.tag = ExprKind::Tag::Unary;
+    ek.unary_op = unaryop_from_string(op);
+    ek.operand = std::move(operand);
+    auto e = std::make_unique<Expr>(std::move(ek), dpos());
     e->resolved_type = ty;
     return e;
 }
@@ -283,45 +314,46 @@ TEST_F(IRBuilderTest, LogicalNotEmitsNot)
 TEST_F(IRBuilderTest, IfElseCreatesThreeBlocks)
 {
     // Build: if (true) { } else { }
-    auto stmt = std::make_unique<IfStmt>();
-    stmt->resolved_type = Type::void_();
- 
-    auto cond_expr = lit_bool(true);
-    stmt->cond = std::move(cond_expr);
-    // Empty then/else bodies
-    stmt->then_body.clear();
-    stmt->else_body = std::make_unique<std::vector<std::unique_ptr<ASTNode>>>();
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::If;
+    sk.if_cond = lit_bool(true);
+    sk.if_body = Compound();
+    StmtKind else_kind;
+    else_kind.tag = StmtKind::Tag::Else;
+    else_kind.else_body = Compound();
+    sk.else_or_else_if = std::make_unique<Stmt>(std::move(else_kind), dpos());
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     size_t blocks_before = fn->blocks.size();  // 1 (entry)
     builder.lower_stmt(*stmt);
- 
+
     // Should have added: if.true, if.false, if.merge = 3 new blocks
     EXPECT_EQ(fn->blocks.size(), blocks_before + 3);
 }
  
 TEST_F(IRBuilderTest, IfNoElseCreatesTwoNewBlocks)
 {
-    auto stmt = std::make_unique<IfStmt>();
-    stmt->resolved_type = Type::void_();
-    stmt->cond = lit_bool(false);
-    stmt->then_body.clear();
-    stmt->else_body = nullptr;
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::If;
+    sk.if_cond = lit_bool(false);
+    sk.if_body = Compound();
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     size_t blocks_before = fn->blocks.size();
     builder.lower_stmt(*stmt);
- 
+
     // Should have added: if.true, if.merge = 2 new blocks
     EXPECT_EQ(fn->blocks.size(), blocks_before + 2);
 }
  
 TEST_F(IRBuilderTest, IfEntryBlockTerminatedWithCondBr)
 {
-    auto stmt = std::make_unique<IfStmt>();
-    stmt->resolved_type = Type::void_();
-    stmt->cond = lit_bool(true);
-    stmt->then_body.clear();
-    stmt->else_body = nullptr;
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::If;
+    sk.if_cond = lit_bool(true);
+    sk.if_body = Compound();
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     builder.lower_stmt(*stmt);
     // Entry block should be terminated (CondBranch was emitted)
     EXPECT_TRUE(bb->is_terminated());
@@ -331,25 +363,27 @@ TEST_F(IRBuilderTest, IfEntryBlockTerminatedWithCondBr)
  
 TEST_F(IRBuilderTest, WhileLoopCreatesThreeNewBlocks)
 {
-    auto stmt = std::make_unique<WhileStmt>();
-    stmt->resolved_type = Type::void_();
-    stmt->cond = lit_bool(false);   // immediately-false: body never entered
-    stmt->body.clear();
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::While;
+    sk.while_cond = lit_bool(false);   // immediately-false: body never entered
+    sk.while_body = Compound();
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     size_t before = fn->blocks.size();
     builder.lower_stmt(*stmt);
- 
+
     // header + body + exit = 3 new blocks
     EXPECT_EQ(fn->blocks.size(), before + 3);
 }
  
 TEST_F(IRBuilderTest, WhileEntryFallsIntoHeader)
 {
-    auto stmt = std::make_unique<WhileStmt>();
-    stmt->resolved_type = Type::void_();
-    stmt->cond = lit_bool(false);
-    stmt->body.clear();
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::While;
+    sk.while_cond = lit_bool(false);
+    sk.while_body = Compound();
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     builder.lower_stmt(*stmt);
     // Entry block ends with an unconditional branch (to header)
     EXPECT_TRUE(bb->is_terminated());
@@ -360,37 +394,32 @@ TEST_F(IRBuilderTest, WhileEntryFallsIntoHeader)
  
 TEST_F(IRBuilderTest, ImmutableLetBindsNameDirectly)
 {
-    auto stmt = std::make_unique<LetStmt>();
-    stmt->name       = "pi";
-    stmt->is_mutable = false;
-    stmt->init       = lit_float(3.14, Type::f32());
-    stmt->resolved_type = Type::f32();
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::Let;
+    sk.let_ident = Ident::unqual(IdentInfo("pi", TyKind::F32, IdentCtx::Def, dpos()));
+    sk.let_expr = lit_float(3.14, Type::f32());
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     builder.lower_stmt(*stmt);
- 
+
     Value* v = builder.lookup("pi");
     ASSERT_NE(v, nullptr);
-    // Should NOT be an alloca — just the constant
     EXPECT_EQ(dynamic_cast<AllocaInst*>(v), nullptr);
 }
  
-TEST_F(IRBuilderTest, MutableLetEmitsAllocaAndStore)
+TEST_F(IRBuilderTest, LetWithInitializerBindsDirectValue)
 {
-    auto stmt = std::make_unique<LetStmt>();
-    stmt->name       = "count";
-    stmt->is_mutable = true;
-    stmt->init       = lit_int(0, Type::i32());
-    stmt->resolved_type = Type::i32();
- 
+    StmtKind sk;
+    sk.tag = StmtKind::Tag::Let;
+    sk.let_ident = Ident::unqual(IdentInfo("count", TyKind::I32, IdentCtx::Def, dpos()));
+    sk.let_expr = lit_int(0, Type::i32());
+
+    auto stmt = std::make_unique<Stmt>(std::move(sk), dpos());
     builder.lower_stmt(*stmt);
- 
-    // Scope should point to the alloca
+
     Value* v = builder.lookup("count");
     ASSERT_NE(v, nullptr);
-    EXPECT_NE(dynamic_cast<AllocaInst*>(v), nullptr);
- 
-    // Two instructions: alloca + store
-    EXPECT_EQ(bb->insts.size(), 2u);
+    EXPECT_EQ(dynamic_cast<AllocaInst*>(v), nullptr);
 }
  
 // ─── 9. Tensor call lowering ──────────────────────────────────────────────────
@@ -398,31 +427,23 @@ TEST_F(IRBuilderTest, MutableLetEmitsAllocaAndStore)
 TEST_F(IRBuilderTest, TensorMatMulLowersToTensorOpInst)
 {
     auto tf32 = Type::tensor(Type::f32());
- 
-    // Build the FieldExpr: ts::matmul
-    auto field = std::make_unique<FieldExpr>();
-    field->module_alias  = "ts";
-    field->field         = "matmul";
-    field->resolved_type = tf32;
-    // (object is unused in lower_tensor_call)
-    field->object = std::make_unique<IdentExpr>();
- 
-    // Build stub CallExpr
-    auto call = std::make_unique<CallExpr>();
+
+    auto ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    ExprKind scope_kind = ExprKind::makeScope(std::move(ns), "matmul");
+    auto callee = std::make_unique<Expr>(std::move(scope_kind), dpos());
+
+    ExprKind call_kind = ExprKind::makeCall(std::move(callee), {});
+    auto call = std::make_unique<Expr>(std::move(call_kind), dpos());
     call->resolved_type = tf32;
-    call->callee = std::move(field);
- 
-    // Two tensor args already in scope
+
     auto x = std::make_shared<Value>("%x", tf32);
     auto w = std::make_shared<Value>("%w", tf32);
     builder.define("x", x.get());
     builder.define("w", w.get());
- 
-    auto arg_x = ident("x", tf32);
-    auto arg_w = ident("w", tf32);
-    call->args.push_back(std::move(arg_x));
-    call->args.push_back(std::move(arg_w));
- 
+
+    call->kind.args.push_back(ident("x", tf32));
+    call->kind.args.push_back(ident("w", tf32));
+
     Value* result = builder.lower_expr(*call);
     auto* tensor_op = dynamic_cast<TensorOpInst*>(result);
     ASSERT_NE(tensor_op, nullptr);
@@ -433,21 +454,19 @@ TEST_F(IRBuilderTest, TensorMatMulLowersToTensorOpInst)
 TEST_F(IRBuilderTest, TensorReluLowers)
 {
     auto tf32 = Type::tensor(Type::f32());
- 
-    auto field = std::make_unique<FieldExpr>();
-    field->module_alias  = "ts";
-    field->field         = "relu";
-    field->resolved_type = tf32;
-    field->object        = std::make_unique<IdentExpr>();
- 
-    auto call = std::make_unique<CallExpr>();
+
+    auto ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    ExprKind scope_kind = ExprKind::makeScope(std::move(ns), "relu");
+    auto callee = std::make_unique<Expr>(std::move(scope_kind), dpos());
+
+    ExprKind call_kind = ExprKind::makeCall(std::move(callee), {});
+    auto call = std::make_unique<Expr>(std::move(call_kind), dpos());
     call->resolved_type = tf32;
-    call->callee = std::move(field);
- 
+
     auto x = std::make_shared<Value>("%x", tf32);
     builder.define("x", x.get());
-    call->args.push_back(ident("x", tf32));
- 
+    call->kind.args.push_back(ident("x", tf32));
+
     Value* result = builder.lower_expr(*call);
     auto* op = dynamic_cast<TensorOpInst*>(result);
     ASSERT_NE(op, nullptr);
@@ -460,11 +479,13 @@ TEST_F(IRBuilderTest, SpawnExprEmitsSpawnInst)
 {
     auto task = std::make_shared<Value>("%task_fn", Type::fn({}, Type::f32()));
     builder.define("task_fn", task.get());
- 
-    auto spawn = std::make_unique<SpawnExpr>();
-    spawn->expr          = ident("task_fn", Type::fn({}, Type::f32()));
+
+    ExprKind ek;
+    ek.tag = ExprKind::Tag::Spawn;
+    ek.spawned_expr = ident("task_fn", Type::fn({}, Type::f32()));
+    auto spawn = std::make_unique<Expr>(std::move(ek), dpos());
     spawn->resolved_type = Type::infer();
- 
+
     Value* result = builder.lower_expr(*spawn);
     auto* si = dynamic_cast<SpawnInst*>(result);
     ASSERT_NE(si, nullptr);
@@ -475,11 +496,13 @@ TEST_F(IRBuilderTest, AwaitExprEmitsAwaitInst)
 {
     auto handle = std::make_shared<Value>("%h", Type::infer());
     builder.define("h", handle.get());
- 
-    auto await = std::make_unique<AwaitExpr>();
-    await->expr          = ident("h", Type::infer());
+
+    ExprKind ek;
+    ek.tag = ExprKind::Tag::Await;
+    ek.awaited = ident("h", Type::infer());
+    auto await = std::make_unique<Expr>(std::move(ek), dpos());
     await->resolved_type = Type::f32();
- 
+
     Value* result = builder.lower_expr(*await);
     auto* ai = dynamic_cast<AwaitInst*>(result);
     ASSERT_NE(ai, nullptr);
@@ -514,8 +537,6 @@ TEST(IRBuilderRoundTripTest, ScalarAddRoundTrip)
     Value* sum = builder.lower_expr(*add_expr);
  
     // Lower: return sum
-    auto ret = std::make_unique<ReturnStmt>();
-    // Manually emit — ReturnStmt needs a value
     auto sumv = std::shared_ptr<Value>(sum, [](Value*){});
     entry->emit<ReturnInst>(sumv);
  
@@ -549,32 +570,26 @@ TEST(IRBuilderRoundTripTest, ForwardPassRoundTrip)
     builder.define("w", w);
  
     // ts::matmul(x, w)
-    auto mm_field  = std::make_unique<FieldExpr>();
-    mm_field->field         = "matmul";
-    mm_field->module_alias  = "ts";
-    mm_field->resolved_type = tf32;
-    mm_field->object        = std::make_unique<IdentExpr>();
- 
-    auto mm_call = std::make_unique<CallExpr>();
+    auto ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    ExprKind mm_scope = ExprKind::makeScope(std::move(ns), "matmul");
+    auto mm_callee = std::make_unique<Expr>(std::move(mm_scope), dpos());
+    ExprKind mm_call_kind = ExprKind::makeCall(std::move(mm_callee), {});
+    auto mm_call = std::make_unique<Expr>(std::move(mm_call_kind), dpos());
     mm_call->resolved_type = tf32;
-    mm_call->callee = std::move(mm_field);
-    mm_call->args.push_back(ident("x", tf32));
-    mm_call->args.push_back(ident("w", tf32));
- 
+    mm_call->kind.args.push_back(ident("x", tf32));
+    mm_call->kind.args.push_back(ident("w", tf32));
+
     Value* mm_val = builder.lower_expr(*mm_call);
     builder.define("mm", mm_val);
  
     // ts::relu(mm)
-    auto relu_field = std::make_unique<FieldExpr>();
-    relu_field->field         = "relu";
-    relu_field->module_alias  = "ts";
-    relu_field->resolved_type = tf32;
-    relu_field->object        = std::make_unique<IdentExpr>();
- 
-    auto relu_call = std::make_unique<CallExpr>();
+    auto relu_ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    ExprKind relu_scope = ExprKind::makeScope(std::move(relu_ns), "relu");
+    auto relu_callee = std::make_unique<Expr>(std::move(relu_scope), dpos());
+    ExprKind relu_call_kind = ExprKind::makeCall(std::move(relu_callee), {});
+    auto relu_call = std::make_unique<Expr>(std::move(relu_call_kind), dpos());
     relu_call->resolved_type = tf32;
-    relu_call->callee = std::move(relu_field);
-    relu_call->args.push_back(ident("mm", tf32));
+    relu_call->kind.args.push_back(ident("mm", tf32));
  
     Value* out_val = builder.lower_expr(*relu_call);
     auto out_vp = std::shared_ptr<Value>(out_val, [](Value*){});

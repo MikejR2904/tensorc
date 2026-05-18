@@ -57,11 +57,17 @@
 #include <vector>
 #include <string>
 #include <functional>
+#include <gtest/gtest.h>
 #include "../compiler/ast/ASTNode.h"
 #include "../compiler/ast/SemanticAnalyzer.h"
 
 // Helper to create a dummy position
 Position dpos() { return {1, 1}; }
+
+std::unique_ptr<SemanticAnalyzer> make_analyzer() {
+    static io::BuiltinRegistry builtins = io::BuiltinRegistry::with_builtins();
+    return std::make_unique<SemanticAnalyzer>(builtins);
+}
 
 void run_test(const std::string& name, std::function<void()> test_func) {
     std::cout << "Running " << name << "... ";
@@ -73,10 +79,10 @@ void run_test(const std::string& name, std::function<void()> test_func) {
     }
 }
 
-int main() {
+void run_all_ast_tests() {
     // --- Test 1: Basic Let with Type Inference ---
     run_test("Inference Test (let x = 5)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // Construct: let x = 5
@@ -90,12 +96,12 @@ int main() {
         sk.let_expr = std::make_unique<Expr>(std::move(ek), dpos());
 
         prog.addStmt(std::make_unique<Stmt>(std::move(sk), dpos()));
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     // --- Test 2: Type Mismatch (let x: i32 = 5.5) ---
     run_test("Type Mismatch Test", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // Construct: let x: i32 = 5.5
@@ -109,12 +115,12 @@ int main() {
         sk.let_expr = std::make_unique<Expr>(std::move(ek), dpos());
 
         prog.addStmt(std::make_unique<Stmt>(std::move(sk), dpos()));
-        analyzer.validate(prog); 
+        analyzer->validate(prog); 
     });
 
     // --- Test 3: Tensor MatMul Check ---
     run_test("Tensor MatMul Validation", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // 1. let A: Tensor = [[...]]
@@ -152,11 +158,11 @@ int main() {
         
         prog.addStmt(std::make_unique<Stmt>(std::move(skExpr), dpos()));
 
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     run_test("Match Statement Validation", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // let x = 10
@@ -190,11 +196,11 @@ int main() {
         skMatch.match_arms.push_back(std::move(arm));
         prog.addStmt(std::make_unique<Stmt>(std::move(skMatch), dpos()));
 
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     run_test("Match Type Mismatch (Int vs Str)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // 1. let x = 10 (I32)
@@ -226,11 +232,11 @@ int main() {
         prog.addStmt(std::make_unique<Stmt>(std::move(skMatch), dpos()));
 
         // This SHOULD throw an exception because I32 != Str
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     run_test("Tensor Shape Success (3x2 @ 2x5)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // 1. let A: Tensor = ... (Shape [3, 2])
@@ -277,11 +283,11 @@ int main() {
         skExpr.expr = std::make_unique<Expr>(std::move(ekMatMul), dpos());
         prog.addStmt(std::make_unique<Stmt>(std::move(skExpr), dpos()));
 
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     run_test("Tensor Shape Mismatch Error (3x2 @ 5x2)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // 1. let A: Tensor [3, 2]
@@ -320,11 +326,11 @@ int main() {
         skExpr.expr = std::make_unique<Expr>(std::move(ekMatMul), dpos());
         prog.addStmt(std::make_unique<Stmt>(std::move(skExpr), dpos()));
 
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     run_test("Function Valid Return (I32)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // 1. Create the pieces for the constructor
@@ -363,12 +369,12 @@ int main() {
         skFunc.func = std::move(fn);
         
         prog.addStmt(std::make_unique<Stmt>(std::move(skFunc), dpos()));
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     // --- New Test: Function Return Type Mismatch ---
     run_test("Function Return Mismatch (Expect I32, got Str)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // Build Func using constructor
@@ -390,12 +396,12 @@ int main() {
         skFunc.func = std::move(fn);
 
         prog.addStmt(std::make_unique<Stmt>(std::move(skFunc), dpos()));
-        analyzer.validate(prog); 
+        analyzer->validate(prog); 
     });
 
     // --- New Test: Grad Scalar Check ---
     run_test("Grad Check (Valid F32 Loss)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // let loss = 0.5; grad(loss, params)
@@ -421,11 +427,11 @@ int main() {
         skExpr.expr = std::make_unique<Expr>(std::move(ekGrad), dpos());
         prog.addStmt(std::make_unique<Stmt>(std::move(skExpr), dpos()));
 
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     run_test("Grad Check (Invalid Loss Type)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         // grad("not a float", my_tensor)
@@ -444,12 +450,12 @@ int main() {
         skExpr.expr = std::make_unique<Expr>(std::move(ekGrad), dpos());
         
         prog.addStmt(std::make_unique<Stmt>(std::move(skExpr), dpos()));
-        analyzer.validate(prog);
+        analyzer->validate(prog);
     });
 
     // --- Test: Loop Context Validation ---
     run_test("Continue Outside Loop (Should Fail)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
 
         StmtKind skCont;
@@ -458,7 +464,7 @@ int main() {
         prog.addStmt(std::make_unique<Stmt>(std::move(skCont), dpos()));
         
         try {
-            analyzer.validate(prog);
+            analyzer->validate(prog);
         } catch (const std::runtime_error& e) {
             std::cout << "Caught Expected Error: " << e.what() << std::endl;
             return; // Success
@@ -468,7 +474,7 @@ int main() {
 
 
     run_test("Function Call - Arg Mismatch (Should Fail)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
         Position dpos = {1, 1};
 
@@ -502,7 +508,7 @@ int main() {
         prog.addStmt(std::make_unique<Stmt>(StmtKind::makeExpr(std::make_unique<Expr>(std::move(ekCall), dpos)), dpos));
 
         try {
-            analyzer.validate(prog);
+            analyzer->validate(prog);
             // If we reach here, the analyzer failed to catch the error
         } catch (const std::runtime_error& e) {
             std::cout << "CAUGHT EXPECTED ERROR: " << e.what() << std::endl;
@@ -510,7 +516,7 @@ int main() {
     });
     
     run_test("Pipe Operator Valid (Tensor -> Func)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program prog;
         Position dpos = {1, 1};
 
@@ -560,11 +566,11 @@ int main() {
         skExpr.expr = std::make_unique<Expr>(std::move(ekPipe), dpos);
         prog.addStmt(std::make_unique<Stmt>(std::move(skExpr), dpos));
 
-        analyzer.validate(prog); 
+        analyzer->validate(prog); 
     });
 
     run_test("Struct Test Invalid (I32 -> UserDef)", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program program;
 
         // 1. Define: struct Layer { id: i32, weight: Tensor }
@@ -616,11 +622,11 @@ int main() {
         );
         program.addStmt(std::move(expr_stmt));
 
-        analyzer.validate(program); 
+        analyzer->validate(program); 
     });
 
     run_test("Struct Test: Undefined Type", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program program;
 
         // We use TyKind::Infer for the RHS so the assignment compatibility check passes
@@ -634,11 +640,11 @@ int main() {
         ));
 
         // NOW it should hit: "Undefined struct type 'UnknownStruct'"
-        analyzer.validate(program); 
+        analyzer->validate(program); 
     });
 
     run_test("Struct Test: Missing Field", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program program;
 
         // 1. struct Point { x: i32 }
@@ -661,11 +667,11 @@ int main() {
         program.addStmt(std::make_unique<Stmt>(StmtKind::makeExpr(std::move(field_expr)), Position{3, 1}));
 
         // Expected: "Struct 'Point' has no field 'y'"
-        analyzer.validate(program);
+        analyzer->validate(program);
     });
 
     run_test("Struct Test: Nested Access", []() {
-        SemanticAnalyzer analyzer;
+        auto analyzer = make_analyzer();
         Program program;
 
         // 1. struct Inner { val: f32 }
@@ -695,8 +701,10 @@ int main() {
         program.addStmt(std::make_unique<Stmt>(StmtKind::makeExpr(std::move(second_access)), Position{4, 1}));
 
         // Should now pass without "Variable assignment type mismatch"
-        analyzer.validate(program);
+        analyzer->validate(program);
     });
+}
 
-    return 0;
+TEST(AstSemanticTests, SemanticAnalyzerRunAll) {
+    run_all_ast_tests();
 }
