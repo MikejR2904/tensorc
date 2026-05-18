@@ -134,7 +134,17 @@ private:
     }
     void visit(SpawnInst& i) override {
         if (!is_infer(i.type)) return;
-        if (i.task && !is_infer(i.task->type)) i.type = i.task->type;
+        if (i.is_async_call()) {
+            // Direct async call: result type is the function's return type
+            if (i.callee && i.callee->type &&
+                i.callee->type->kind == Type::Kind::Fn) {
+                auto ret = i.callee->type->ret_type();
+                if (ret && !is_infer(ret)) i.type = ret;
+            }
+        } else {
+            // Closure spawn: propagate the task's type
+            if (i.task && !is_infer(i.task->type)) i.type = i.task->type;
+        }
     }
     void visit(CallInst& i) override {
         if (!is_infer(i.type)) return;
@@ -676,8 +686,15 @@ private:
             for (size_t k = 0; k < t->args.size(); ++k)
                 check_one(t->args[k], ("tensor_arg[" + std::to_string(k) + "]").c_str());
         }
-        else if (auto* sp = dynamic_cast<const SpawnInst*>(&inst))
-            { check_one(sp->task, "task"); }
+        else if (auto* sp = dynamic_cast<const SpawnInst*>(&inst)) {
+            if (sp->is_async_call()) {
+                check_one(sp->callee, "spawn_callee");
+                for (size_t k = 0; k < sp->call_args.size(); ++k)
+                    check_one(sp->call_args[k], ("spawn_arg[" + std::to_string(k) + "]").c_str());
+            } else {
+                check_one(sp->task, "task");
+            }
+        }
         else if (auto* aw = dynamic_cast<const AwaitInst*>(&inst))
             { check_one(aw->handle, "handle"); }
         else if (auto* pf = dynamic_cast<const ParallelForInst*>(&inst))

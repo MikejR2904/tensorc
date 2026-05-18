@@ -315,7 +315,22 @@ private:
         line(s);
     }
 
-    void print_spawn(const SpawnInst& i) { line(i.name + " = spawn " + val(i.task) + type_comment(i.type)); }
+    void print_spawn(const SpawnInst& i)
+    {
+        if (i.is_async_call()) {
+            // Direct async call form: %h = spawn @fn(%arg0, %arg1, ...)
+            std::string s = i.name + " = spawn " + val(i.callee) + "(";
+            for (size_t a = 0; a < i.call_args.size(); ++a) {
+                s += val(i.call_args[a]);
+                if (a + 1 < i.call_args.size()) s += ", ";
+            }
+            s += ")" + type_comment(i.type);
+            line(s);
+        } else {
+            // Closure/value form: %h = spawn %closure
+            line(i.name + " = spawn " + val(i.task) + type_comment(i.type));
+        }
+    }
     void print_await(const AwaitInst& i) { line(i.name + " = await " + val(i.handle) + type_comment(i.type)); }
     void print_parallel_for(const ParallelForInst& i) { line("parallel_for " + val(i.n) + ", " + val(i.body_fn)); }
     void print_parallel_map(const ParallelMapInst& i) { line(i.name + " = parallel_map " + val(i.array) + ", " + val(i.map_fn) + type_comment(i.type)); }

@@ -290,8 +290,28 @@ struct TensorOpInst : Instruction
 /// Launches a value (closure / fn-ptr) asynchronously. The result is an opaque future handle.
 struct SpawnInst : Instruction
 {
+    // Form 1: direct async call
+    ValuePtr              callee;    // the async Function value
+    std::vector<ValuePtr> call_args; // arguments to pass when scheduled
+ 
+    // Form 2: closure/value spawn
     ValuePtr task;
-    SpawnInst(std::string name, TypePtr handle_type, ValuePtr task): Instruction(std::move(name), std::move(handle_type)), task(task) { track_uses({task}); }
+ 
+    /// Construct a direct async call spawn: spawn @fn(args...)
+    SpawnInst(std::string name, TypePtr handle_type, ValuePtr callee, std::vector<ValuePtr> call_args)
+        : Instruction(std::move(name), std::move(handle_type)), callee(callee), call_args(std::move(call_args))
+    {
+        std::vector<ValuePtr> all = {callee};
+        all.insert(all.end(), this->call_args.begin(), this->call_args.end());
+        track_uses(all);
+    }
+ 
+    /// Construct a closure/value spawn: spawn %task
+    SpawnInst(std::string name, TypePtr handle_type, ValuePtr task)
+        : Instruction(std::move(name), std::move(handle_type)), task(task) { track_uses({task}); }
+ 
+    bool is_async_call() const { return callee != nullptr; }
+ 
     void accept(InstructionVisitor& visitor) override { visitor.visit(*this); }
 };
  
@@ -413,7 +433,11 @@ inline void replaceAllUsesWith(Value* old_val, const ValuePtr& replacement_share
         if (auto* t  = dynamic_cast<TensorOpInst*>(user))     {
             for (auto& a : t->args) patch(a);
         }
-        if (auto* sp = dynamic_cast<SpawnInst*>(user))        { patch(sp->task); }
+        if (auto* sp = dynamic_cast<SpawnInst*>(user))        {
+            if (sp->task) patch(sp->task);
+            if (sp->callee) patch(sp->callee);
+            for (auto& a : sp->call_args) patch(a);
+        }
         if (auto* aw = dynamic_cast<AwaitInst*>(user))        { patch(aw->handle); }
         if (auto* pf = dynamic_cast<ParallelForInst*>(user))  { patch(pf->n); patch(pf->body_fn); }
         if (auto* pm = dynamic_cast<ParallelMapInst*>(user))  { patch(pm->array); patch(pm->map_fn); }

@@ -837,17 +837,22 @@ private:
             if (!callee_name.empty()) {
                 auto it = global_functions.find(callee_name);
                 if (it != global_functions.end()) async_fn = it->second;
+                // Also try with @ prefix
+                if (!async_fn) {
+                    it = global_functions.find("@" + callee_name);
+                    if (it != global_functions.end()) async_fn = it->second;
+                }
             }
             if (async_fn && async_fn->is_async) {
                 // Lower arguments only — do NOT call the function
                 std::vector<ValuePtr> args;
                 for (auto& a : call_e.kind.args) args.push_back(vp(lower_expr(*a)));
                 TypePtr ret_ty = async_fn->type && async_fn->type->ret_type() ? async_fn->type->ret_type() : Type::infer();
-                // Build a small CallInst that represents "schedule this call"
-                // then hand it to SpawnInst as the task value.
-                // The spawned task value IS the call; the handle has the return type.
-                Value* call_val = emit<CallInst>(fresh(), ret_ty, vp(async_fn), std::move(args));
-                return emit<SpawnInst>(fresh("task"), ret_ty, vp(call_val));
+                
+                // Emit a single SpawnInst(callee, args)
+                // The printer renders this as:  %h = spawn @fn(%arg0, ...)
+                // The backend writes the args into a command queue and returns a handle.
+                return emit<SpawnInst>(fresh("task"), ret_ty, vp(async_fn), std::move(args));
             }
         }
         // Fallback: spawning a closure / fn-value directly
