@@ -1,4 +1,4 @@
-﻿![TensorC Logo](tensorc-vscode/tensorc/icons/tensorc_logo.svg)
+﻿![TensorC Logo](tensorc_logo.svg)
 
 # TensorC Compiler Framework
 

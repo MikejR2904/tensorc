@@ -1,0 +1,38 @@
+<svg width="512" height="512" viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg" fill="none">
+  <!-- Transparent background -->
+  
+  <!-- Cube outline -->
+  <g stroke="#E5E7EB" stroke-width="28" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Top face -->
+    <path d="M156 196 L256 136 L356 196" />
+    
+    <!-- Left vertical edge -->
+    <path d="M156 196 L156 336" />
+    
+    <!-- Right vertical edge -->
+    <path d="M356 196 L356 336" />
+    
+    <!-- Bottom face -->
+    <path d="M156 336 L256 396 L356 336" />
+    
+    <!-- Hidden back edges (optional style hint) -->
+    <path d="M256 136 L256 276" opacity="0.5"/>
+
+    <path d="M156 336 L256 276" opacity="0.5"/>
+
+    <path d="M256 276 L356 336" opacity="0.5"/>
+  </g>
+
+  <!-- Stylized "C" inside cube -->
+  <path 
+    d="M300 240 
+       Q260 200 220 240 
+       L220 300 
+       Q260 340 300 300" 
+    stroke="#E5E7EB" 
+    stroke-width="28" 
+    fill="none" 
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  />
+</svg>
