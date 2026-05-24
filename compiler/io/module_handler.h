@@ -27,13 +27,11 @@ public:
     virtual ~ModuleHandler() = default;
  
     /// Attempt to lower a module function call to IR.
-    ///
     /// @param builder  The IRBuilder instance (provides emit, scope access, etc.)
     /// @param func_name  Unqualified function name (e.g., "dot", not "tensor::dot")
     /// @param args  Pre-lowered IR values for arguments
     /// @param ret_type  Expected return type from semantic analysis
     /// @return IR Value* result, or nullptr if handler cannot lower this call
-    ///
     /// If returns nullptr, IRBuilder will fall back to generic function call lowering.
     virtual ir::Value* lower_call(
         ir::IRBuilder* builder,
@@ -78,9 +76,7 @@ public:
     bool has_handler(const std::string& module_name) const {
         return get_handler(module_name) != nullptr;
     }
- 
-    /// Factory: Create and populate with all built-in handlers.
-    /// Implemented in module_handler.cpp.
+
     static ModuleHandlerRegistry with_builtins();
  
 private:

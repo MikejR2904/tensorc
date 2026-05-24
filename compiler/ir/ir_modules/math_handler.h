@@ -1,13 +1,9 @@
 #pragma once
  
-/// compiler/ir/ir_modules/math_handler.h
-///
 /// MathModuleHandler — lowers  math::sin(x), math::pi, etc.
-///
 /// All math module functions are scalar (f32 → f32 or f32,f32 → f32).
 /// They lower to CallInst targeting "@math.<name>" which the runtime
 /// links to the C standard library (libm) or a built-in scalar FPU op.
-///
 /// Constants (math::pi, math::e, …) are lowered to ConstantFloat literals
 /// so they are inlined and never produce a call at all.
  

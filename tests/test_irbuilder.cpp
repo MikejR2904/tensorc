@@ -428,7 +428,7 @@ TEST_F(IRBuilderTest, TensorMatMulLowersToTensorOpInst)
 {
     auto tf32 = Type::tensor(Type::f32());
 
-    auto ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    auto ns = std::make_unique<Expr>(ExprKind::makeId("tensor", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
     ExprKind scope_kind = ExprKind::makeScope(std::move(ns), "matmul");
     auto callee = std::make_unique<Expr>(std::move(scope_kind), dpos());
 
@@ -455,7 +455,7 @@ TEST_F(IRBuilderTest, TensorReluLowers)
 {
     auto tf32 = Type::tensor(Type::f32());
 
-    auto ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    auto ns = std::make_unique<Expr>(ExprKind::makeId("tensor", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
     ExprKind scope_kind = ExprKind::makeScope(std::move(ns), "relu");
     auto callee = std::make_unique<Expr>(std::move(scope_kind), dpos());
 

@@ -20,7 +20,10 @@ using Scope = std::unordered_map<std::string, Value*>;
 class IRBuilder
 {
 public:
-    IRBuilder() = default;
+    IRBuilder()
+        : default_handlers_(io::ModuleHandlerRegistry::with_builtins()),
+          handler_registry_(&default_handlers_)
+    {}
  
     // Main entry to build IR from an AST program
     void build(const Program& prog, IRModule* mod, const io::BuiltinRegistry& builtins, const io::ModuleHandlerRegistry& handlers)
@@ -292,7 +295,7 @@ private:
         }
     }
 
-    ir::IRModule* mod_;
+    ir::IRModule* mod_ = nullptr;
     Function* fn_ = nullptr;
     BasicBlock* bb_ = nullptr;
     int counter_ = 0;
@@ -302,7 +305,8 @@ private:
     std::vector<BasicBlock*> loop_header_stack_;
     std::unordered_map<Value*, ValuePtr> ptr_cache_;
     // Non-owning pointer to the module handler registry (owned by CLI entry point)
-    const io::ModuleHandlerRegistry* handler_registry_ = nullptr;
+    const io::ModuleHandlerRegistry* handler_registry_;
+    io::ModuleHandlerRegistry default_handlers_;
     std::unordered_map<std::string, std::string> ns_aliases_;
     
 public:
@@ -938,10 +942,11 @@ private:
     }
  
     Value* lower_await(const Expr& e) {
-        if (!e.kind.operand) {
+        Expr* awaited_expr = e.kind.operand ? e.kind.operand.get() : e.kind.awaited.get();
+        if (!awaited_expr) {
             throw std::runtime_error("IRBuilder Error: 'await' expression is missing its target operand.");
         }
-        Value* handle = lower_expr(*e.kind.operand);
+        Value* handle = lower_expr(*awaited_expr);
         TypePtr result_ty = e.resolved_type && !e.resolved_type->is_infer() ? e.resolved_type : handle->type;
         return emit<AwaitInst>(fresh("await_tmp"), result_ty, vp(handle));
     }
