@@ -86,6 +86,27 @@ import tensor as ts;
 
 Documentation on the built-in modules and how to construct custom modules to be included in the future iterations.
 
+### Import syntax (updated)
+
+Top-level import statements are parsed and resolved before IR lowering. Supported forms:
+
+ - `import std;`               — builtin module
+ - `import tensor as ts;`      — builtin with alias
+ - `import "./utils" as utils;` — file-based module (relative path)
+
+Notes:
+ - Imports are collected into the AST under `Program.imports` (fields: `module_name`, `alias`, `raw_path`).
+ - File imports are resolved by `io::ImportResolver` and then registered into the `io::BuiltinRegistry`/`ModuleHandlerRegistry`.
+ - Module lowering is provided by `ModuleHandler` implementations; built-ins are registered via `io::ModuleHandlerRegistry::with_builtins()`.
+
+### Adding a custom module handler
+
+1. Create a handler header in `compiler/ir/ir_modules/` implementing `io::ModuleHandler` (implement `lower_call`).
+2. Add a minimal `.cpp` implementing `lower_call` (or keep header-only) and include it in `CMakeLists.txt` under `CORE_SOURCES`.
+3. Register your handler in `compiler/io/module_handler.cpp` inside `ModuleHandlerRegistry::with_builtins()` with `registry.register_handler(std::make_unique<ir::YourHandler>());`.
+
+This keeps `IRBuilder` free of hardcoded module branches — new modules only require a handler and registration.
+
 ### Function declarations
 
 ```text

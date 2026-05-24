@@ -26,6 +26,14 @@ set(CORE_SOURCES
     compiler/lexer/Lexer.cpp
     compiler/parser/Parser.cpp
     compiler/ast/Type.cpp
+    compiler/io/module_handler.cpp
+    compiler/ir/ir_modules/tensor_handler.cpp
+    compiler/ir/ir_modules/std_handler.cpp
+    compiler/ir/ir_modules/math_handler.cpp
+    compiler/ir/ir_modules/nn_handler.cpp
+    compiler/ir/ir_modules/optim_handler.cpp
+    compiler/ir/ir_modules/data_handler.cpp
+    compiler/ir/ir_modules/parallel_handler.cpp
 )
 
 # ==================== Compiler Engine Core ====================

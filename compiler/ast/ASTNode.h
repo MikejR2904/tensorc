@@ -501,5 +501,12 @@ struct Stmt : public ASTNode
 struct Program // The root of the AST, containing a list of top-level statements (function definitions, global variable declarations, imports, etc.).
 {
     std::vector<StmtPtr> stmts;
+    // Top-level resolved imports (module_name is the canonical module path/name; alias is the local alias)
+    struct Import {
+        std::string module_name;
+        std::string alias;
+        std::string raw_path;
+    };
+    std::vector<Import> imports;
     void addStmt(StmtPtr s) { stmts.push_back(std::move(s)); }
 };

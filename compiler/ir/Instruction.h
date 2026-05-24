@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <cstdint>
 
 namespace ir {
  
@@ -110,6 +111,7 @@ enum class TensorOpCode {
     Backward, Grad, NoGrad, Detach, ZeroGrad, RequiresGrad,
     // Fused kernels
     FusedMatMulRelu, FusedMatMulGelu, FusedMatMulSilu, FusedMatMulTanh, FusedElemChain,
+    Unknown,
 };
  
 /// True for opcodes that were created by FusionPass and map to a single fused kernel.  The backend uses this to route to the correct dispatch path.

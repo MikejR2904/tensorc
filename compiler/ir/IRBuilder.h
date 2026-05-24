@@ -4,12 +4,14 @@
 #include "IRPrinter.h"
 #include "../ast/ASTNode.h"
 #include "../io/builtins.h"
+#include "../io/module_handler.h"
  
 #include <memory>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <iostream>
  
 namespace ir {
  
@@ -21,9 +23,12 @@ public:
     IRBuilder() = default;
  
     // Main entry to build IR from an AST program
-    void build(const Program& prog, IRModule* mod, const io::BuiltinRegistry& builtins)
+    void build(const Program& prog, IRModule* mod, const io::BuiltinRegistry& builtins, const io::ModuleHandlerRegistry& handlers)
     {
         this->mod_ = mod;
+        handler_registry_ = &handlers;
+        // Populate alias map from import statements before any lowering
+        register_import_aliases(prog);
         // Register all builtin symbols in the global scope
         register_builtins(builtins);
         // Register all user-defined struct types so IR can resolve Named types consistently.
@@ -197,6 +202,12 @@ public:
         
         return inst;
     }
+
+    // Accessors for module handlers (allow implementation to interact with the builder without holding a back-pointer to its internals)
+    // (Defined later with const overloads)
+    Value* keep_value(std::shared_ptr<Value> v) {
+        return keep(std::move(v));
+    }
  
     // Public lowering interfaces
     Value* lower_expr(const Expr& e)
@@ -290,7 +301,32 @@ private:
     std::vector<BasicBlock*> loop_exit_stack_;
     std::vector<BasicBlock*> loop_header_stack_;
     std::unordered_map<Value*, ValuePtr> ptr_cache_;
+    // Non-owning pointer to the module handler registry (owned by CLI entry point)
+    const io::ModuleHandlerRegistry* handler_registry_ = nullptr;
+    std::unordered_map<std::string, std::string> ns_aliases_;
+    
+public:
+    // Accessors for module handlers (provides controlled access to internals)
+    ir::IRModule* get_module() const { return mod_; }
+    std::unordered_map<std::string, Function*>& get_global_functions() { return global_functions; }
+    const std::unordered_map<std::string, Function*>& get_global_functions() const { return global_functions; }
+    
+    // Allow handlers to emit instructions (already public via template)
+    // Allow handlers to access fresh(), define(), etc. (already public)
+    
+private:
     std::unordered_map<std::string, Function*> global_functions;
+
+    void register_import_aliases(const Program& prog) {
+        for (auto& imp : prog.imports) {
+            if (!imp.alias.empty() && imp.alias != imp.module_name) ns_aliases_[imp.alias] = imp.module_name;
+        }
+    }
+
+    const std::string& resolve_ns_alias(const std::string& ns) const {
+        auto it = ns_aliases_.find(ns);
+        return (it != ns_aliases_.end()) ? it->second : ns;
+    }
  
     // Non-owning shared_ptr alias so raw Value* can be passed as ValuePtr
     ValuePtr vp(Value* v) {
@@ -529,10 +565,13 @@ private:
  
     Value* lower_id(const Expr& e) {
         const std::string& name = e.kind.id.name();
+        // std::cerr << "[DEBUG] lower_id called for '" << name << "'\n";
         Value* v = lookup(name);
+        // std::cerr << "[DEBUG] lookup returned " << (void*)v << "\n";
         if (!v && mod_) {
             std::string fn_name = (name.empty() || name[0] != '@') ? "@" + name : name;
             v = mod_->find_function(fn_name);
+            // std::cerr << "[DEBUG] mod_->find_function(" << fn_name << ") -> " << (void*)v << "\n";
         }
         if (!v) throw std::runtime_error("IRBuilder: undefined name '" + name + "'");
         if (dynamic_cast<AllocaInst*>(v)) return emit<LoadInst>(fresh(name), v->type, vp(v));
@@ -579,8 +618,7 @@ private:
                 else
                     matmul_ty = Type::tensor(Type::f32());
             }
-            return emit<TensorOpInst>(fresh(), matmul_ty, TensorOpCode::MatMul,
-                                      std::vector<ValuePtr>{vp(l),vp(r)});
+            return emit<TensorOpInst>(fresh(), matmul_ty, TensorOpCode::MatMul, std::vector<ValuePtr>{vp(l),vp(r)});
         }
  
         // All remaining arithmetic / logical ops
@@ -593,7 +631,7 @@ private:
         if (!res_ty || res_ty->is_infer()) res_ty = rhs->type;
         if (!res_ty) res_ty = Type::infer();
  
-        // KEY FIX: If either operand is a Tensor, emit TensorOpInst(ElemXxx).
+        // If either operand is a Tensor, emit TensorOpInst(ElemXxx).
         // BinOpInst is only correct for scalar arithmetic.  Tensor element-wise
         // ops must be TensorOpInst so:
         //   1. The backend dispatches to a vectorised/broadcast kernel, not a scalar ALU op.
@@ -718,29 +756,68 @@ private:
     Value* lower_call(const Expr& e) {
         const Expr& callee = *e.kind.callee;
         TypePtr ret = expr_type(e);
-        std::vector<ValuePtr> args;
+        
+        // Dispatch through ModuleHandlerRegistry — with fallbacks for core builtins
+        // Each module registers a handler; IRBuilder just queries and delegates.
         if (callee.kind.tag == ExprKind::Tag::Scope) {
-            std::string ns = callee.kind.target->kind.id.name();
-            if (ns == "ts") {
+            const std::string& ns  = callee.kind.target->kind.id.name();
+            const std::string& sym = callee.kind.member;
+ 
+            std::vector<ValuePtr> args;
+            for (auto& a : e.kind.args) args.push_back(vp(lower_expr(*a)));
+ 
+            // Resolve import alias: "ts" → "tensor", "m" → "math", etc.
+            const std::string& canonical = resolve_ns_alias(ns);
+
+            // Built-in fallbacks when no handler registry is present (unit tests, simple cases)
+            if (canonical == "tensor") {
                 return lower_tensor_call(callee, e.kind.args, ret);
-            } 
-            if (ns == "std") {
-                return lower_std_call(callee.kind.member, e.kind.args, ret);
             }
+            if (canonical == "std") {
+                return lower_std_call(sym, e.kind.args, ret);
+            }
+
+            // Delegate to a registered handler if available
+            if (handler_registry_) {
+                io::ModuleHandler* handler = handler_registry_->get_handler(canonical);
+                if (handler) {
+                    Value* result = handler->lower_call(this, sym, args, ret);
+                    if (result) return result;
+                    // Handler returned nullptr: unknown symbol in a known module.
+                    // Fall through to emit a stub CallInst so the linker errors clearly.
+                }
+            }
+
+            // No handler / handler declined — emit a generic CallInst stub.
+            std::string mangled = "@" + canonical + "." + sym;
+            Function* stub_fn = mod_ ? mod_->find_function(mangled) : nullptr;
+            if (!stub_fn && mod_) {
+                std::vector<TypePtr> param_tys;
+                for (auto& a : args) param_tys.push_back(a ? a->type : Type::infer());
+                stub_fn = mod_->add_function(mangled,
+                    Type::fn(param_tys, ret ? ret : Type::void_()), false);
+                global_functions[mangled] = stub_fn;
+            }
+            bool is_void = !ret || ret->is_void();
+            return emit<CallInst>(is_void ? "" : fresh(), ret ? ret : Type::void_(), vp(stub_fn), std::move(args));
         }
-        for (auto& a : e.kind.args) {
-            args.push_back(vp(lower_expr(*a)));
-        }
+ 
+        // Plain function call: identifier(args...)
+        std::vector<ValuePtr> args;
+        for (auto& a : e.kind.args) args.push_back(vp(lower_expr(*a)));
+ 
         if (callee.kind.tag == ExprKind::Tag::Id) {
-            std::string name = callee.kind.id.name();
+            const std::string& name = callee.kind.id.name();
             auto it = global_functions.find(name);
             if (it != global_functions.end()) {
                 Function* fn = it->second;
-                return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(fn), std::move(args));
+                bool is_void = !ret || ret->is_void();
+                return emit<CallInst>(is_void ? "" : fresh(), ret ? ret : Type::void_(), vp(fn), std::move(args));
             }
         }
-        Value* callee_val = lower_expr(callee); 
-        return emit<CallInst>(ret->is_void() ? "" : fresh(), ret, vp(callee_val), std::move(args));
+        Value* callee_val = lower_expr(callee);
+        bool is_void = !ret || ret->is_void();
+        return emit<CallInst>(is_void ? "" : fresh(), ret ? ret : Type::void_(), vp(callee_val), std::move(args));
     }
  
     Value* lower_tensor_call(const Expr& scope_callee, const std::vector<ExprPtr>& ast_args, TypePtr ret_type)
@@ -852,12 +929,12 @@ private:
                 // Emit a single SpawnInst(callee, args)
                 // The printer renders this as:  %h = spawn @fn(%arg0, ...)
                 // The backend writes the args into a command queue and returns a handle.
-                return emit<SpawnInst>(fresh("task"), ret_ty, vp(async_fn), std::move(args));
+                return emit<SpawnInst>(fresh("h"), ret_ty, vp(async_fn), std::move(args));
             }
         }
         // Fallback: spawning a closure / fn-value directly
         Value* task = lower_expr(*e.kind.spawned_expr);
-        return emit<SpawnInst>(fresh("task"), task->type, vp(task));
+        return emit<SpawnInst>(fresh("h"), task->type, vp(task));
     }
  
     Value* lower_await(const Expr& e) {

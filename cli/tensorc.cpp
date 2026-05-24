@@ -13,6 +13,7 @@
 #include "../compiler/ast/ASTNode.h"
 #include "../compiler/ast/SemanticAnalyzer.h"
 #include "../compiler/io/io.h"
+#include "../compiler/io/module_handler.h"
 #include "../compiler/ir/ir.h"
 
 static void print_usage()
@@ -80,13 +81,14 @@ int main(int argc, char** argv)
         // Semantic analysis
         // BuiltinRegistry is constructed once here and moved into the analyser, keeping ownership explicit at the top of the compilation pipeline.
         io::BuiltinRegistry builtins = io::BuiltinRegistry::with_builtins();
+        io::ModuleHandlerRegistry handlers = io::ModuleHandlerRegistry::with_builtins();
         SemanticAnalyzer sema(builtins);
         sema.validate(program);
 
         // IR generation
         ir::IRBuilder builder;
         auto module = std::make_unique<ir::IRModule>(filepath);
-        builder.build(program, module.get(), builtins);
+        builder.build(program, module.get(), builtins, handlers);
         int fusions = ir::PassPipeline::run(*module);
  
         auto t1 = std::chrono::high_resolution_clock::now();
