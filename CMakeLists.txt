@@ -52,6 +52,9 @@ target_compile_options(tensorc_lib PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror -O3>
 )
 
+# ==================== Code Generation Backend ====================
+add_subdirectory(codegen)
+
 # ==================== Driver Executable ====================
 add_executable(tensorc cli/tensorc.cpp)
 target_link_libraries(tensorc PRIVATE tensorc_lib)
