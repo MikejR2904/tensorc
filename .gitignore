@@ -1,5 +1,6 @@
 build/
 build_codegen/
 .github/
+tests/outputs/
 
 tensorc-vscode/
