@@ -43,6 +43,12 @@ std::string AsmPrinter::vec_name(int r) const {
 }
 
 std::string AsmPrinter::operand_str(const MachineOperand& op) const {
+    if (op.is_label) {
+        return op.label;
+    }
+    if (op.is_mem) {
+        return std::to_string(op.imm) + "(" + gpr_name(op.base_reg) + ")";
+    }
     if (!op.is_reg) {
         return std::to_string(op.imm);
     }

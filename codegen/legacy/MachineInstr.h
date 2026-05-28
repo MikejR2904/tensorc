@@ -29,9 +29,14 @@ static constexpr int SPILLED = INT32_MIN;
 struct MachineOperand {
     bool    is_reg    = false; // true → register operand (virtual or physical)
     bool    is_vreg   = true;  // true before RegAlloc; false after (physical)
+    bool    is_mem    = false;
+    bool    is_label  = false;
     int     reg       = -1;    // virtual / physical register number
+    int     base_reg  = -1;
+    bool    base_is_vreg = false;
     int     spill_slot = -1;   // valid only when reg == SPILLED after RegAlloc
     int64_t imm       = 0;     // immediate value (when is_reg == false)
+    std::string label;
     RegClass rclass   = RegClass::GPR;
 
     // ── Factory helpers ───────────────────────────────────────────────────
@@ -48,6 +53,15 @@ struct MachineOperand {
 
     static MachineOperand imm_op(int64_t v) {
         MachineOperand op; op.is_reg = false; op.imm = v; return op;
+    }
+
+    static MachineOperand label_op(std::string name) {
+        MachineOperand op; op.is_label = true; op.label = std::move(name); return op;
+    }
+
+    static MachineOperand mem(int base, int64_t offset = 0, bool base_vreg = true, RegClass rc = RegClass::GPR) {
+        MachineOperand op; op.is_mem = true; op.base_reg = base; op.base_is_vreg = base_vreg;
+        op.imm = offset; op.rclass = rc; return op;
     }
 
     static MachineOperand spill(int slot, RegClass rc = RegClass::GPR) {

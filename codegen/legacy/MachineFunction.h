@@ -41,6 +41,7 @@ struct MachineFunction {
     /// Maps IR Value pointers to virtual register IDs so InstrSelector can
     /// reuse the same vreg when the same Value appears in multiple instructions.
     std::unordered_map<const void*, int> value_to_vreg;
+    std::unordered_map<const void*, std::string> block_labels;
 
     /// Allocate or look up the vreg for an IR Value.
     int vreg_for(const void* val) {
@@ -49,6 +50,11 @@ struct MachineFunction {
         int id = vregs.next();
         value_to_vreg[val] = id;
         return id;
+    }
+
+    std::string label_for(const void* block) const {
+        auto it = block_labels.find(block);
+        return it == block_labels.end() ? "entry" : it->second;
     }
 
     /// Total number of spill slots allocated by RegAlloc.

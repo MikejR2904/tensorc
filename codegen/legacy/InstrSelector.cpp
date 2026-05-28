@@ -172,7 +172,7 @@ void InstrSelector::visit(ir::LoadInst& inst)
     int ptr = vreg(inst.ptr.get());
     emit(MachineInstr::make("ld")
         .add(MachineOperand::vreg(dst))
-        .add(MachineOperand::vreg(ptr)));
+        .add(MachineOperand::mem(ptr, 0, true)));
 }
 
 void InstrSelector::visit(ir::StoreInst& inst)
@@ -181,7 +181,7 @@ void InstrSelector::visit(ir::StoreInst& inst)
     int ptr = vreg(inst.ptr.get());
     emit(MachineInstr::make("sd")
         .add(MachineOperand::vreg(val))
-        .add(MachineOperand::vreg(ptr)));
+        .add(MachineOperand::mem(ptr, 0, true)));
 }
 
 // ── Tensor operations ─────────────────────────────────────────────────────────
@@ -262,7 +262,7 @@ void InstrSelector::visit(ir::TensorOpInst& inst)
             .add(MachineOperand::preg(10))
             .add(MachineOperand::vreg(arg_reg(0))));
         emit(MachineInstr::make("call")
-            .add(MachineOperand::imm_op(0))); // symbol: vexp_f64
+            .add(MachineOperand::label_op("vexp_f64")));
         emit(MachineInstr::make("mv")
             .add(MachineOperand::vreg(dst))
             .add(MachineOperand::preg(10)));
@@ -283,7 +283,7 @@ void InstrSelector::visit(ir::TensorOpInst& inst)
                 .add(MachineOperand::vreg(arg_reg(k))));
         }
         emit(MachineInstr::make("call")
-            .add(MachineOperand::imm_op(0))); // symbol: fused_elem_chain_kernel
+            .add(MachineOperand::label_op("fused_elem_chain_kernel")));
         emit(MachineInstr::make("mv")
             .add(MachineOperand::vreg(dst))
             .add(MachineOperand::preg(10)));
@@ -302,7 +302,7 @@ void InstrSelector::visit(ir::TensorOpInst& inst)
             .add(MachineOperand::preg(11))
             .add(MachineOperand::vreg(arg_reg(1))));
         emit(MachineInstr::make("call")
-            .add(MachineOperand::imm_op(0))); // symbol: matmul_tile_f64
+            .add(MachineOperand::label_op("matmul_tile_f64")));
         // Capture return value from a0
         emit(MachineInstr::make("mv")
             .add(MachineOperand::vreg(dst))
@@ -314,28 +314,28 @@ void InstrSelector::visit(ir::TensorOpInst& inst)
     case ir::TensorOpCode::FusedMatMulRelu: {
         emit(MachineInstr::make("mv").add(MachineOperand::preg(10)).add(MachineOperand::vreg(arg_reg(0))));
         emit(MachineInstr::make("mv").add(MachineOperand::preg(11)).add(MachineOperand::vreg(arg_reg(1))));
-        emit(MachineInstr::make("call").add(MachineOperand::imm_op(0))); // matmul_relu_tile_f64
+        emit(MachineInstr::make("call").add(MachineOperand::label_op("matmul_relu_tile_f64")));
         emit(MachineInstr::make("mv").add(MachineOperand::vreg(dst)).add(MachineOperand::preg(10)));
         break;
     }
     case ir::TensorOpCode::FusedMatMulGelu: {
         emit(MachineInstr::make("mv").add(MachineOperand::preg(10)).add(MachineOperand::vreg(arg_reg(0))));
         emit(MachineInstr::make("mv").add(MachineOperand::preg(11)).add(MachineOperand::vreg(arg_reg(1))));
-        emit(MachineInstr::make("call").add(MachineOperand::imm_op(0))); // matmul_gelu_tile_f64
+        emit(MachineInstr::make("call").add(MachineOperand::label_op("matmul_gelu_tile_f64")));
         emit(MachineInstr::make("mv").add(MachineOperand::vreg(dst)).add(MachineOperand::preg(10)));
         break;
     }
     case ir::TensorOpCode::FusedMatMulSilu: {
         emit(MachineInstr::make("mv").add(MachineOperand::preg(10)).add(MachineOperand::vreg(arg_reg(0))));
         emit(MachineInstr::make("mv").add(MachineOperand::preg(11)).add(MachineOperand::vreg(arg_reg(1))));
-        emit(MachineInstr::make("call").add(MachineOperand::imm_op(0))); // matmul_silu_tile_f64
+        emit(MachineInstr::make("call").add(MachineOperand::label_op("matmul_silu_tile_f64")));
         emit(MachineInstr::make("mv").add(MachineOperand::vreg(dst)).add(MachineOperand::preg(10)));
         break;
     }
     case ir::TensorOpCode::FusedMatMulTanh: {
         emit(MachineInstr::make("mv").add(MachineOperand::preg(10)).add(MachineOperand::vreg(arg_reg(0))));
         emit(MachineInstr::make("mv").add(MachineOperand::preg(11)).add(MachineOperand::vreg(arg_reg(1))));
-        emit(MachineInstr::make("call").add(MachineOperand::imm_op(0))); // matmul_tanh_tile_f64
+        emit(MachineInstr::make("call").add(MachineOperand::label_op("matmul_tanh_tile_f64")));
         emit(MachineInstr::make("mv").add(MachineOperand::vreg(dst)).add(MachineOperand::preg(10)));
         break;
     }
@@ -359,8 +359,11 @@ void InstrSelector::visit(ir::CallInst& inst)
             .add(MachineOperand::preg(10 + (int)i))
             .add(MachineOperand::vreg(vreg(inst.args[i].get()))));
     }
+    std::string callee = inst.callee ? inst.callee->name : "";
+    if (!callee.empty() && callee[0] == '@') callee.erase(callee.begin());
+    if (callee.empty()) callee = "unknown_callee";
     emit(MachineInstr::make("call")
-        .add(MachineOperand::imm_op(0))); // symbol resolved by linker from inst.callee->name
+        .add(MachineOperand::label_op(callee)));
 
     // Capture result from a0 if the call produces a value
     if (!inst.name.empty()) {
@@ -405,25 +408,19 @@ void InstrSelector::visit(ir::PhiInst& inst)
 
 void InstrSelector::visit(ir::BranchInst& inst)
 {
-    // Encode the target block pointer as an immediate; AsmPrinter resolves it
-    // to the label string.
-    int64_t target_id = reinterpret_cast<intptr_t>(inst.target);
     emit(MachineInstr::make("j")
-        .add(MachineOperand::imm_op(target_id)));
+        .add(MachineOperand::label_op(mf->label_for(inst.target))));
 }
 
 void InstrSelector::visit(ir::CondBranchInst& inst)
 {
     int cond = vreg(inst.cond.get());
-    int64_t true_id  = reinterpret_cast<intptr_t>(inst.true_bb);
-    int64_t false_id = reinterpret_cast<intptr_t>(inst.false_bb);
-
     // bnez cond, true_label; j false_label
     emit(MachineInstr::make("bnez")
         .add(MachineOperand::vreg(cond))
-        .add(MachineOperand::imm_op(true_id)));
+        .add(MachineOperand::label_op(mf->label_for(inst.true_bb))));
     emit(MachineInstr::make("j")
-        .add(MachineOperand::imm_op(false_id)));
+        .add(MachineOperand::label_op(mf->label_for(inst.false_bb))));
 }
 
 } // namespace codegen

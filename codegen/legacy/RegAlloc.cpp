@@ -1,4 +1,5 @@
 #include "RegAlloc.h"
+#include <algorithm>
 #include <unordered_map>
 #include <vector>
 
@@ -23,6 +24,16 @@
 
 namespace codegen {
 
+static bool first_operand_is_def(const std::string& opcode)
+{
+    if (opcode.empty() || opcode[0] == '#') return false;
+    if (opcode == "sd" || opcode == "fsd" || opcode == "j" ||
+        opcode == "bnez" || opcode == "ret" || opcode == "call") {
+        return false;
+    }
+    return true;
+}
+
 void RegAlloc::allocate(MachineFunction& mf)
 {
     // ── Pass 1: collect vregs and their register classes ─────────────────
@@ -32,6 +43,8 @@ void RegAlloc::allocate(MachineFunction& mf)
             for (auto& op : mi.ops) {
                 if (op.is_reg && op.is_vreg)
                     vreg_class.emplace(op.reg, op.rclass);
+                if (op.is_mem && op.base_is_vreg)
+                    vreg_class.emplace(op.base_reg, op.rclass);
             }
         }
     }
@@ -74,8 +87,13 @@ void RegAlloc::allocate(MachineFunction& mf)
         }
     };
 
-    // Assign all collected vregs
-    for (auto& [v, rc] : vreg_class) assign_vreg(v, rc);
+    std::vector<int> ordered_vregs;
+    ordered_vregs.reserve(vreg_class.size());
+    for (auto& [v, _rc] : vreg_class) ordered_vregs.push_back(v);
+    std::sort(ordered_vregs.begin(), ordered_vregs.end());
+
+    // Assign all collected vregs deterministically by virtual-register id.
+    for (int v : ordered_vregs) assign_vreg(v, vreg_class[v]);
     mf.spill_slots = next_spill;
 
     // ── Pass 2: rewrite operands, insert spill code ───────────────────────
@@ -90,10 +108,25 @@ void RegAlloc::allocate(MachineFunction& mf)
 
             for (size_t op_idx = 0; op_idx < mi.ops.size(); ++op_idx) {
                 auto& op = mi.ops[op_idx];
+                if (op.is_mem && op.base_is_vreg) {
+                    int v = op.base_reg;
+                    if (gpr_assign.count(v)) {
+                        op.base_reg = gpr_assign[v];
+                    } else if (spill_assign.count(v)) {
+                        int offset = get_stack_offset(spill_assign[v]);
+                        pre.push_back(MachineInstr::make("ld")
+                            .add(MachineOperand::preg(5))
+                            .add(MachineOperand::mem(2, offset, false)));
+                        op.base_reg = 5;
+                    }
+                    op.base_is_vreg = false;
+                    continue;
+                }
+
                 if (!op.is_reg || !op.is_vreg) continue;
 
                 int v  = op.reg;
-                bool is_def = (op_idx == 0); // First operand = definition
+                bool is_def = (op_idx == 0) && first_operand_is_def(mi.opcode);
 
                 auto assign = [&](int preg) {
                     op.reg    = preg;
@@ -117,13 +150,13 @@ void RegAlloc::allocate(MachineFunction& mf)
                         const char* ld_op = (op.rclass == RegClass::FPR) ? "fld" : "ld";
                         pre.push_back(MachineInstr::make(ld_op)
                             .add(MachineOperand::preg(scratch, op.rclass))
-                            .add(MachineOperand::imm_op(offset))); // offset(sp)
+                            .add(MachineOperand::mem(2, offset, false)));
                     } else {
                         // After def: store scratch back to spill slot
                         const char* sd_op = (op.rclass == RegClass::FPR) ? "fsd" : "sd";
                         post.push_back(MachineInstr::make(sd_op)
                             .add(MachineOperand::preg(scratch, op.rclass))
-                            .add(MachineOperand::imm_op(offset)));
+                            .add(MachineOperand::mem(2, offset, false)));
                         is_def_spilled = true;
                     }
                     op.reg     = scratch;

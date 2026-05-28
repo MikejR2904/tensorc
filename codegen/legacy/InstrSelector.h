@@ -21,6 +21,10 @@ namespace codegen {
 struct InstrSelector : ir::InstructionVisitor {
     explicit InstrSelector(MachineFunction* mf) : mf(mf) {}
 
+    void start_block(std::string label) {
+        mf->blocks.push_back({std::move(label), {}});
+    }
+
     // ── Visitor overrides ─────────────────────────────────────────────────
     void visit(ir::BinOpInst&)      override;
     void visit(ir::UnOpInst&)       override;

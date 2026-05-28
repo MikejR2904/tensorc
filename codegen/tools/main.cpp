@@ -1,10 +1,15 @@
 #include "../../compiler/ir/IRModule.h"
 #include "../../compiler/ir/Instruction.h"
 #include "../../compiler/ir/Value.h"
-#include "../InstrSelector.h"
-#include "../CodegenDriver.h"
+#include "../legacy/InstrSelector.h"
+#include "../legacy/CodegenDriver.h"
 #include <iostream>
 #include <fstream>
+
+static ir::ValuePtr borrow(ir::Value* value)
+{
+    return ir::ValuePtr(value, [](ir::Value*) {});
+}
 
 int main()
 {
@@ -17,12 +22,12 @@ int main()
     auto* b = fn->add_param("b", Type::i64());
     
     // Create shared_ptr wrappers using the constructor
-    ValuePtr a_ptr(a);
-    ValuePtr b_ptr(b);
+    ValuePtr a_ptr = borrow(a);
+    ValuePtr b_ptr = borrow(b);
     auto* c = fn->entry()->emit<BinOpInst>("c", Type::i64(), BinOpCode::Add, a_ptr, b_ptr);
     
     // Create ValuePtr for return
-    ValuePtr c_ptr(c);
+    ValuePtr c_ptr = borrow(c);
     fn->entry()->emit<ReturnInst>(c_ptr);
 
     // Lower to assembly
