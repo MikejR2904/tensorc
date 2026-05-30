@@ -41,12 +41,12 @@ void test_begin(const std::string& name)
 void test_pass()
 {
     test_passed++;
-    std::cout << "✓ PASSED\n";
+    std::cout << "[YES] PASSED\n";
 }
 
 void test_fail(const std::string& reason)
 {
-    std::cout << "✗ FAILED: " << reason << "\n";
+    std::cout << "[NO] FAILED: " << reason << "\n";
 }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -55,7 +55,7 @@ void test_fail(const std::string& reason)
 
 void test_matmul_tiling()
 {
-    test_begin("MatMul Tiling (128×256 × 256×128 → 128×128)");
+    test_begin("MatMul Tiling (128x256 x 256x128 to 128x128)");
     
     try {
         auto mod = std::make_shared<IRModule>("<test_matmul>");
@@ -113,7 +113,7 @@ void test_matmul_tiling()
 
 void test_scratchpad_allocation()
 {
-    test_begin("Scratchpad Allocation (8×8 systolic with 8 KB limit)");
+    test_begin("Scratchpad Allocation (8x8 systolic with 8 KB limit)");
     
     try {
         // Create a simple loop nest with buffers

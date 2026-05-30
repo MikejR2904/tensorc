@@ -1,7 +1,3 @@
-# Legacy Codegen System
-
-**Status**: Maintained for backward compatibility. Used for simple scalar operations.
-
 ## Overview
 
 The legacy system implements a basic RISC-V 64-bit code generation pipeline for simple operations:

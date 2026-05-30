@@ -2,79 +2,146 @@
 
 **Location**: `codegen/tools/`
 
-This directory contains test programs and diagnostic utilities for the codegen module.
+This directory contains comprehensive test suites and diagnostic utilities for the codegen module. Tests are organized by subsystem and complexity level.
 
-## Test Files
+## Core Test Utilities
 
-### main.cpp
-**Purpose**: Basic legacy pipeline test
+### test_utils.h
+**Purpose**: Shared testing infrastructure
 
-**Tests**:
-- Simple scalar addition
-- Simple scalar multiplication
-- Simple branch/conditional
+**Provides**:
+- `AsmInstr` - Parsed assembly instruction representation
+- `parse_assembly()` - Parse assembly text into structured instructions
+- `AssemblyValidator` - Validate assembly output against patterns
+  - `has_mnemonic()` - Check for instruction presence
+  - `has_pattern()` - Check for instruction sequences
+  - `ends_with_return()` - Validate proper function termination
+  - `instr_count()` - Get total instruction count
+- `read_asm_file()` - Load assembly from file
+- `write_reference()` - Save reference assembly
 
-**Usage**:
+**Usage**: `#include "test_utils.h"`
+
+## Legacy System Tests
+
+### test_legacy_scalar.cpp
+**Purpose**: Scalar operations in the legacy codegen pipeline
+
+**Test Suite** (7 comprehensive tests):
+1. **Integer Addition (i64)** - Basic add instruction verification
+2. **Integer Multiplication (i64)** - mul instruction validation
+3. **Floating-Point Addition (f64)** - fadd.d instruction verification
+4. **Integer Division (i64)** - div/udiv instruction validation
+5. **Floating-Point Multiplication (f64)** - fmul.d verification
+6. **Chained Operations** - Multiple operations with data flow
+7. **Register Pressure** - Stress test with many temporaries
+
+**Validation Checks**:
+- Correct instruction mnemonics present
+- Proper function termination with return
+- Reasonable instruction count
+
+**Build & Run**:
 ```bash
-./codegen-test
+cmake --build . --target codegen-scalar-test
+./build/bin/codegen-scalar-test
 ```
 
-**Output**: Generated assembly text file for inspection
+### test_legacy_extended.cpp
+**Purpose**: Extended operations and tensor lowering in legacy system
 
-### comprehensive_test.cpp
-**Purpose**: Extended tests of the legacy system
+**Test Suite** (7 comprehensive tests):
+1. **Tensor Element-Wise Add (8×8)** - Vector operations or library calls
+2. **Tensor Element-Wise Multiply (8×8)** - vmul or library equivalents
+3. **Matrix Multiplication (32×32)** - Library call verification
+4. **Fused MatMul + ReLU (32×32)** - Kernel fusion validation
+5. **Conditional Branch** - if-else logic, branch instruction generation
+6. **Loop Structure** - Chained accumulation operations
+7. **Mixed Type Operations** - Integer and float operations together
 
-**Tests**:
-- Scalar arithmetic (add, sub, mul, div with i64, f64)
-- Memory operations (load, store)
-- Function parameters and return values
-- Control flow (branches, jumps)
-- Mixed-type operations
+**Validation Checks**:
+- Tensor operations generate appropriate calls or intrinsics
+- Control flow branches emit conditional jump instructions
+- Mixed-type operations handle both int and float correctly
 
-**Coverage**:
-- Tests InstrSelector, RegAlloc, AsmPrinter integration
-- Exercises most code paths in the legacy pipeline
-- Validates assembly output format
-
-**Usage**:
+**Build & Run**:
 ```bash
-./codegen-comprehensive-test
+cmake --build . --target codegen-legacy-extended-test
+./build/bin/codegen-legacy-extended-test
 ```
+
+## Progressive Lowering Tests
 
 ### test_progressive_lowering.cpp
-**Purpose**: End-to-end tests of the new progressive lowering pipeline
+**Purpose**: End-to-end tests of the four-phase progressive lowering pipeline
 
-**Tests**:
-1. **MatMul tiling verification**
-   - 32×32 MatMul → 4×4 tiles of 8×8
-   - Validates tiling loop structure
+**Test Suite** (6 comprehensive tests):
+1. **MatMul Tiling (128×256×128)** - Phase A: Tiling → LLIR
+   - Verifies loop structure generation
+   - Checks tile dimensions and iteration bounds
+   
+2. **Scratchpad Allocation (8 KB)** - Phase B: Memory planning
+   - Validates allocation under 8 KB constraint
+   - Checks greedy reuse strategy
+   
+3. **K > 64 Reduction Spilling** - Phase B: Automatic spilling
+   - Detects large K dimensions
+   - Verifies outer loop injection for chunks
+   
+4. **Double-Buffering Scheduling** - Phase C: Async scheduling
+   - Confirms ping/pong buffer creation
+   - Validates compute/memory overlap setup
+   
+5. **RISC-V Target Emission** - Phase D: Target-specific code
+   - Complete pipeline to RISC-V assembly
+   - Validates custom .insn directives and ABI names
+   
+6. **x86_64 Target Emission** - Phase D: x86 alternative
+   - Complete pipeline to x86 assembly
+   - Validates AVX2 operations and calling conventions
 
-2. **Scratchpad allocation**
-   - 8 KB constraint respected
-   - Live-range analysis works correctly
-
-3. **K > 64 spilling detection**
-   - MatMul(32×200×32) triggers automatic spilling
-   - Outer reduction loops injected
-
-4. **Double-buffering scheduler**
-   - Prefetch + compute overlap detected
-   - Scoreboard events inserted correctly
-
-5. **RISC-V end-to-end emission**
-   - Complete pipeline: Tiler → ScratchpadAllocator → Scheduler → RiscVTargetEmitter
-   - Validates assembly output for RISC-V
-
-6. **x86_64 end-to-end emission**
-   - Complete pipeline with x86 target
-   - Validates x86 assembly format
-
-**Usage**:
+**Build & Run**:
 ```bash
-./codegen-progressive-test
+cmake --build . --target codegen-progressive-test
+./build/bin/codegen-progressive-test
 ```
 
-**Output**: Diagnostic information, generated assembly files
+## Quick Reference: Running Tests
+
+### Run All Tests
+```bash
+# Build all tests
+cmake --build . --config Debug --target codegen-scalar-test codegen-legacy-extended-test codegen-progressive-test
+
+# Run via CTest
+ctest -R "codegen" --output-on-failure
+
+# Or use convenience script
+bash codegen/tools/run_tests.sh
+```
+
+### Run Individual Test Suite
+```bash
+# Scalar operations only
+./build/bin/codegen-scalar-test
+
+# Extended operations only
+./build/bin/codegen-legacy-extended-test
+
+# Progressive lowering only
+./build/bin/codegen-progressive-test
+```
+
+### View Generated Assembly
+Test programs write assembly files to the current directory:
+```bash
+# After running tests
+ls -la test_legacy_*.s         # Legacy system outputs
+ls -la test_*.s                # Progressive system outputs
+
+# View a specific output
+cat test_legacy_i64_add.s
+```
 
 ## Running Tests
 

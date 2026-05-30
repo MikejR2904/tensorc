@@ -13,23 +13,28 @@ add_library(codegen
     NewCodegenDriver.cpp
 )
 
-add_executable(codegen-test tools/main.cpp)
-target_link_libraries(codegen-test PRIVATE codegen)
+add_executable(codegen-scalar-test tools/test_legacy_scalar.cpp)
+target_link_libraries(codegen-scalar-test PRIVATE codegen)
 
-add_executable(codegen-comprehensive-test tools/comprehensive_test.cpp)
-target_link_libraries(codegen-comprehensive-test PRIVATE codegen)
+add_executable(codegen-legacy-extended-test tools/test_legacy_extended.cpp)
+target_link_libraries(codegen-legacy-extended-test PRIVATE codegen)
 
 add_executable(codegen-progressive-test tools/test_progressive_lowering.cpp)
 target_link_libraries(codegen-progressive-test PRIVATE codegen)
 
-add_custom_target(run-codegen-test
-    COMMAND codegen-test
-    DEPENDS codegen-test
+add_custom_target(run-codegen-scalar-test
+    COMMAND codegen-scalar-test
+    DEPENDS codegen-scalar-test
 )
 
-add_custom_target(run-codegen-comprehensive
-    COMMAND codegen-comprehensive-test
-    DEPENDS codegen-comprehensive-test
+add_custom_target(run-codegen-legacy-extended
+    COMMAND codegen-legacy-extended-test
+    DEPENDS codegen-legacy-extended-test
+)
+
+add_custom_target(run-codegen-progressive
+    COMMAND codegen-progressive-test
+    DEPENDS codegen-progressive-test
 )
 
 
