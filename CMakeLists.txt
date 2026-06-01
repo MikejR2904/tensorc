@@ -52,14 +52,8 @@ target_compile_options(tensorc_lib PRIVATE
     $<$<NOT:$<CXX_COMPILER_ID:MSVC>>:-Wall -Wextra -Wpedantic -Werror -O3>
 )
 
-# ==================== Code Generation Backend ====================
-add_subdirectory(codegen)
-
-# ==================== Driver Executable ====================
-add_executable(tensorc cli/tensorc.cpp)
-target_link_libraries(tensorc PRIVATE tensorc_lib)
-
-# ==================== Integrated Tests ====================
+# ==================== Fetch GoogleTest Early ====================
+# Do this before any tests need it
 if(BUILD_TESTS)
     include(FetchContent)
     
@@ -71,6 +65,20 @@ if(BUILD_TESTS)
 
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
     FetchContent_MakeAvailable(googletest)
+endif()
+
+# ==================== Code Generation Backend ====================
+add_subdirectory(codegen)
+
+# ==================== Codegen Tools & Tests ====================
+add_subdirectory(codegen/tools)
+
+# ==================== Driver Executable ====================
+add_executable(tensorc cli/tensorc.cpp)
+target_link_libraries(tensorc PRIVATE tensorc_lib)
+
+# ==================== Integrated Tests ====================
+if(BUILD_TESTS)
 
     enable_testing()
 

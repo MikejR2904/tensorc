@@ -64,6 +64,47 @@ std::string AsmPrinter::operand_str(const MachineOperand& op) const {
     }
 }
 
+// In AsmPrinter.cpp, before the instruction emission loop:
+static void peephole(MachineFunction& mf)
+{
+    for (auto& bb : mf.blocks) {
+        std::vector<MachineInstr> out;
+        out.reserve(bb.instrs.size());
+        
+        for (size_t i = 0; i < bb.instrs.size(); ++i) {
+            const auto& mi = bb.instrs[i];
+            
+            // Rule 1: drop identity mv (mv rX, rX)
+            if (mi.opcode == "mv" && mi.ops.size() == 2
+                && mi.ops[0].is_reg && mi.ops[1].is_reg
+                && !mi.ops[0].is_vreg && !mi.ops[1].is_vreg
+                && mi.ops[0].reg == mi.ops[1].reg) {
+                continue;
+            }
+            
+            // Rule 2: drop mv rA, rT followed immediately by mv rT, rA (round-trip)
+            if (mi.opcode == "mv" && mi.ops.size() == 2
+                && i + 1 < bb.instrs.size()) {
+                const auto& next = bb.instrs[i + 1];
+                if (next.opcode == "mv" && next.ops.size() == 2
+                    && mi.ops[0].is_reg && !mi.ops[0].is_vreg
+                    && mi.ops[1].is_reg && !mi.ops[1].is_vreg
+                    && next.ops[0].is_reg && !next.ops[0].is_vreg
+                    && next.ops[1].is_reg && !next.ops[1].is_vreg
+                    && mi.ops[0].reg == next.ops[1].reg
+                    && mi.ops[1].reg == next.ops[0].reg) {
+                    // mv rA, rT; mv rT, rA — skip both
+                    ++i;
+                    continue;
+                }
+            }
+            
+            out.push_back(mi);
+        }
+        bb.instrs = std::move(out);
+    }
+}
+
 void AsmPrinter::print(const MachineFunction& mf)
 {
     // Function prologue
@@ -80,6 +121,7 @@ void AsmPrinter::print(const MachineFunction& mf)
         os << "\taddi\tsp, sp, -" << frame_size << "\n";
     }
 
+    peephole(const_cast<MachineFunction&>(mf)); // apply peephole optimizations before printing
     for (const auto& bb : mf.blocks) {
         os << bb.label << ":\n";
         for (const auto& mi : bb.instrs) {

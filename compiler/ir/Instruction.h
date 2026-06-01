@@ -281,6 +281,10 @@ struct TensorOpInst : Instruction
     };
     std::vector<ElemNode> elem_body; 
     std::vector<TensorOpCode> chain_ops; // For fused element-wise chains, the list of ops in the chain (e.g. [Relu, Exp, Log] for a chain of .relu().exp().log())
+    
+    // Set by TensorOpLoweringPass: pre-lowered assembly text
+    // If non-empty, AsmPrinter will emit this verbatim instead of using legacy pipeline
+    std::string lowered_asm;
  
     TensorOpInst(std::string name, TypePtr type, TensorOpCode op, std::vector<ValuePtr> args)
         : Instruction(std::move(name), std::move(type)), op(op), args(std::move(args)) { track_uses(this->args); }
