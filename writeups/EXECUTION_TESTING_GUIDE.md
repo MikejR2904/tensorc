@@ -1,5 +1,13 @@
 # Execution Testing Guide
 
+> **Superseded.** This was an aspirational design draft (the "harness"
+> described below was never implemented). Real, working execution testing —
+> compile real `.tcc` source, assemble and link with the local toolchain,
+> execute on real hardware, compare against an independently-computed
+> expected value — now exists; see
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md) at
+> the repo root. This document is kept for historical reference only.
+
 ## Overview
 
 The TensorC codegen now includes **CPU execution tests** that go beyond assembly validation. These tests:

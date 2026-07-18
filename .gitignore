@@ -1,6 +1,11 @@
 build/
 build_codegen/
+build_*/
 .github/
 tests/outputs/
+tests/results/*
+!tests/results/README.md
+.claude
+.agents
 
 tensorc-vscode/

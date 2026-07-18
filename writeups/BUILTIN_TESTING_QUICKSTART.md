@@ -1,5 +1,13 @@
 # Comprehensive Builtin Module Verification
 
+> **Note.** The tests this quickstart runs
+> (`test_builtin_modules.cpp`/`test_execution_examples.cpp`) compare a C++
+> reference implementation against itself (e.g. `std::sin(x)` checked
+> against `std::sin(x)`) — they can't catch a compiler bug because no
+> TensorC code is compiled or run. For real compile → assemble → link →
+> execute → compare testing, see
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md).
+
 ## Quick Start
 
 ### Run All Builtin Module Tests

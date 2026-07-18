@@ -18,7 +18,9 @@
 
 #include "../compiler/ir/IRModule.h"
 #include "../compiler/ir/Instruction.h"
-#include "lowering/LoopNest.h"
+#include "NewCodegenDriver.h"
+#include "ScalarCodegenPipeline.h"
+#include "lowering/Tiler.h"
 #include <map>
 #include <ostream>
 #include <string>
@@ -41,6 +43,11 @@ public:
     /// Lower a scalar IR function to assembly file
     /// Returns true on success, false otherwise
     bool lower_scalar_function(ir::Function* fn, const std::string& out_path);
+
+    /// Lower a full IR module. Tensor ops are first lowered into sidecar
+    /// kernels through the bridge pass, then scalar/control-flow code is
+    /// emitted through the legacy machine pipeline.
+    bool lower_module_to_asm(ir::IRModule& mod, const std::string& out_path);
     
     // ════════════════════════════════════════════════════════════════════════
     // Tensor Operations (Progressive Lowering Pipeline)
@@ -65,7 +72,7 @@ private:
     
     // Lazy-initialized pipeline components
     void init_progressive_pipeline();
-    std::unique_ptr<class ProgressiveLoweringPipeline> progressive_pipeline_;
+    std::unique_ptr<ProgressiveLoweringPipeline> progressive_pipeline_;
 };
 
 } // namespace codegen

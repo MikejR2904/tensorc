@@ -1,5 +1,14 @@
 # Complete Builtin Module Execution and Verification Guide
 
+> **Inaccurate.** Despite the "Framework Complete" status below, builtin
+> module calls (`math::*`, `tensor::*`, ...) don't actually link — they
+> lower to mangled symbol names (e.g. `math.sin`, not libc's `sin`) with no
+> definition anywhere. See
+> [BUILTIN_EXECUTION_TESTING.md](BUILTIN_EXECUTION_TESTING.md)'s correction
+> notice and
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md) for
+> what's actually implemented and execution-verified.
+
 **Status**: ✅ Comprehensive Testing Framework Complete  
 **Date**: 2026-06-02  
 **Coverage**: All 6 builtin modules + 39 unit tests + integration tests

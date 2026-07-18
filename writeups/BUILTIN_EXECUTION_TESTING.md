@@ -1,5 +1,17 @@
 # Builtin Module Execution Testing Guide
 
+> **Partly inaccurate.** This document's claim that `math::*` is
+> "Implemented as CallInst to C standard library" is wrong: it lowers to a
+> `CallInst` targeting the *mangled* symbol `math.sin` (see
+> `compiler/ir/ir_modules/math_handler.cpp`), not the real libc symbol
+> `sin` — so it compiles but the resulting `call math.sin` instruction has
+> no matching definition anywhere and can't link. No runtime/shim library
+> exists yet for builtin-module calls. For what's actually implemented and
+> execution-verified today (scalar arithmetic and control flow, not
+> builtin-module calls), see
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md)'s
+> "What's out of scope" section.
+
 **Status**: Comprehensive Testing Framework Ready  
 **Coverage**: All 6 builtin modules (math, tensor, nn, optim, parallel, std)  
 **Date**: 2026-06-02

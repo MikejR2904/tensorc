@@ -1,5 +1,13 @@
 # VERIFICATION COMPLETE: All IR Instructions Have Lowering Paths ✅
 
+> **Inaccurate — kept for historical reference only.** Same correction as
+> [VERIFICATION_CHECKLIST.md](VERIFICATION_CHECKLIST.md): the legacy scalar
+> pipeline this document verifies has been deleted and replaced (see
+> [codegen/README.md](../codegen/README.md)), and its coverage claims were
+> already partly false when written. See
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md) for
+> current, execution-verified coverage.
+
 **Status**: VERIFIED  
 **Date**: 2026-05-16  
 **Build**: SUCCESSFUL (no errors)  

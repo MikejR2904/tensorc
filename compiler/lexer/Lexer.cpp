@@ -53,20 +53,6 @@ static const std::unordered_map<std::string, TokenKind> KEYWORDS = {
 
 static bool isBraceCollectionOpener(TokenKind k) { return k == TokenKind::KW_MAP; }
 
-static LexContext bracketContextFor(TokenKind k)
-{
-    switch (k)
-    {
-        case TokenKind::KW_TENSOR: return LexContext::TENSOR;
-        case TokenKind::KW_SET:    return LexContext::SET;
-        case TokenKind::KW_QUEUE:  return LexContext::QUEUE;
-        case TokenKind::KW_STACK:  return LexContext::STACK;
-        case TokenKind::KW_TUPLE:  return LexContext::TUPLE;
-        case TokenKind::RPAREN:    return LexContext::TENSOR; // Tensor#(...)[
-        default:                   return LexContext::ARRAY;
-    }
-}
-
 Lexer::Lexer(const std::string& src) // constructor method
 {
     source = src;

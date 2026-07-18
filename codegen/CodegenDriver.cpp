@@ -4,8 +4,10 @@
 
 #include "CodegenDriver.h"
 #include "NewCodegenDriver.h"
-#include "legacy/CodegenDriver.h"
+#include "bridge/TensorOpLowering.h"
+#include <fstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace codegen {
 
@@ -18,13 +20,69 @@ bool CodegenDriver::lower_scalar_function(ir::Function* fn, const std::string& o
 {
     try {
         diagnostic_.clear();
-        bool success = codegen::lower_function_to_asm(fn, out_path);
+        ScalarCodegenPipeline pipeline(target_);
+        if (!pipeline.valid()) {
+            diagnostic_ = "Unknown target for scalar codegen: " + target_;
+            return false;
+        }
+        std::ofstream out(out_path);
+        if (!out) {
+            diagnostic_ = "Failed to open output assembly path: " + out_path;
+            return false;
+        }
+        bool success = pipeline.lower_function(*fn, out);
         if (!success) {
-            diagnostic_ = "Legacy pipeline failed to lower scalar function: " + fn->name;
+            diagnostic_ = "Scalar pipeline failed to lower function: " + fn->name;
         }
         return success;
     } catch (const std::exception& e) {
         diagnostic_ = std::string("Scalar lowering exception: ") + e.what();
+        return false;
+    }
+}
+
+bool CodegenDriver::lower_module_to_asm(ir::IRModule& mod, const std::string& out_path)
+{
+    try {
+        diagnostic_.clear();
+
+        bridge::TensorOpLoweringPass tensor_lowering(target_);
+        tensor_lowering.run(mod);
+
+        std::ofstream out(out_path);
+        if (!out) {
+            diagnostic_ = "Failed to open output assembly path: " + out_path;
+            return false;
+        }
+
+        ScalarCodegenPipeline pipeline(target_);
+        if (!pipeline.valid()) {
+            diagnostic_ = "Unknown target for scalar codegen: " + target_;
+            return false;
+        }
+        for (auto& fn : mod.functions) {
+            if (!pipeline.lower_function(*fn, out)) {
+                diagnostic_ = "Scalar pipeline failed to lower function: " + fn->name;
+                return false;
+            }
+            out << "\n";
+        }
+
+        std::unordered_set<std::string> emitted_kernels;
+        for (auto& fn : mod.functions) {
+            for (auto& bb : fn->blocks) {
+                for (auto& inst : bb->insts) {
+                    auto* tensor_op = dynamic_cast<ir::TensorOpInst*>(inst.get());
+                    if (!tensor_op || tensor_op->lowered_asm.empty()) continue;
+                    if (!emitted_kernels.insert(tensor_op->name).second) continue;
+                    out << tensor_op->lowered_asm << "\n";
+                }
+            }
+        }
+
+        return true;
+    } catch (const std::exception& e) {
+        diagnostic_ = std::string("Module lowering exception: ") + e.what();
         return false;
     }
 }

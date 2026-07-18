@@ -384,9 +384,6 @@ struct ReshapeInst : Instruction
 };
 
 
-/// Helper: patch one ValuePtr if it points at old_val
-static inline void patch_ptr(ValuePtr& vp, Value* old_val, Value* new_val, const std::shared_ptr<Value>& new_shared) { if (vp.get() == old_val) vp = new_shared; }
- 
 inline void Value::replaceAllUsesWith(Value* replacement) {
     if (replacement == this) return;
  

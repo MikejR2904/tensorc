@@ -1,5 +1,14 @@
 # TensorOpLowering Implementation Summary
 
+> **Inaccurate.** This "94+ operations fully covered" claim was already false
+> when written: most handlers in `codegen/bridge/TensorOpLowering.cpp` are
+> stub `; TODO: Implement` comments that emit no instructions (elementwise,
+> activation, reduction, shape, and most other categories); only the
+> matmul-family path reaches real code, and that code targets a speculative
+> custom accelerator ISA, not real hardware — see the "Tensor pipeline"
+> section of [codegen/README.md](../codegen/README.md). This document is
+> kept for historical/design reference only, not as a status report.
+
 **Status**: ✅ COMPLETE - All 94+ tensor operations fully covered
 
 **Date**: 2026-05-16  

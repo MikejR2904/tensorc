@@ -1,5 +1,18 @@
 # ✅ VERIFICATION COMPLETE: All Instructions Lowered
 
+> **Inaccurate — kept for historical reference only.** This document's
+> "Legacy InstrSelector → RegAlloc → AsmPrinter" pipeline has been deleted
+> and replaced by a target-independent Machine IR with real liveness-based
+> register allocation, for both x86-64 and RISC-V64 (see
+> [codegen/README.md](../codegen/README.md)). Separately, its "94/94 tensor
+> operations complete" claim was already false when written — most
+> `TensorOpLowering` handlers are stub `; TODO` comments emitting no code
+> (see `codegen/bridge/TensorOpLowering.cpp`) — so treat both the pipeline
+> description and the coverage numbers below as aspirational, not current
+> state. For what's actually implemented and verified by real execution
+> (not just "a switch statement has a case for it"), see
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md).
+
 ## Summary
 
 **All 107 non-async IR instructions now have complete lowering paths from high-level IR to machine code.**

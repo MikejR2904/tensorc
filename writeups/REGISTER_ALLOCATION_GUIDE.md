@@ -1,321 +1,134 @@
-# Graph Coloring Register Allocation
+# Register Allocation
 
 ## Overview
 
-The TensorC compiler now uses a sophisticated **graph coloring-based register allocator** implementing Chaitin's algorithm instead of simple greedy allocation. This dramatically improves code quality by:
-
-- ✓ Accurate liveness analysis (not just first-to-last use)
-- ✓ Interference graph construction (tracks true register conflicts)
-- ✓ Chaitin's graph coloring algorithm (optimal assignment)
-- ✓ Intelligent spilling decisions (spill lowest-cost vregs)
-- ✓ Register coalescing opportunities (eliminate redundant moves)
-
-## Problem with Greedy Allocation
-
-The previous simple greedy allocator had significant limitations:
-
-```
-LIMITATIONS:
-- No liveness analysis (treats all vregs as live from first to last use)
-- No register coalescing (emits redundant mv instructions)
-- Simple greedy allocation (no graph coloring)
-```
-
-**Example Problem:**
-```cpp
-// IR: a = x + y; b = z * w; print(a); print(b);
-// Greedy allocator assigns a→x10, b→x11 (no conflict!)
-// But if x10 and x11 both run out, both spill unnecessarily
-
-// Graph coloring sees:
-// - a and b never live simultaneously
-// - Reuses x10 for both → 0 spills
-```
-
-## Algorithm: Chaitin's Coloring
-
-### Phase 1: Liveness Analysis
-
-Compute live-in and live-out sets for each basic block using dataflow analysis:
-
-```cpp
-// For each block, compute:
-// live_in(block)   = variables live at block entry
-// live_out(block)  = variables live at block exit
-// live_after(instr) = variables live after each instruction
-
-// Iterate to fixed point:
-for (each block backwards) {
-    live = live_out[block]
-    for (each instr backwards) {
-        live = (live - defs[instr]) ∪ uses[instr]
-    }
-}
-```
-
-### Phase 2: Build Interference Graph
-
-Create a graph where:
-- **Nodes** = virtual registers
-- **Edges** = interference (variables simultaneously live)
-
-```
-Algorithm:
-for (each basic block) {
-    for (each instruction) {
-        S = live_after(instruction)
-        for (each pair v1, v2 in S) {
-            add_edge(v1, v2)
-        }
-        // Update S based on instruction defs/uses
-    }
-}
-```
-
-### Phase 3: Graph Coloring
-
-**Simplified Chaitin's algorithm:**
-
-```
-workList = {all nodes}
-colorLimit = 8  // GPR: 8, FPR: 8, Vector: 16
-
-while (workList not empty) {
-    // Find node with degree < K
-    node = find_low_degree_node(workList)
-    
-    if (node exists) {
-        // Remove from graph, push to stack
-        push(stack, node)
-        remove(workList, node)
-        decrement degree of neighbors
-    } else {
-        // Must spill: pick node with lowest spill cost
-        spill_candidate = select_spill()
-        spill(spill_candidate)
-        remove(workList, spill_candidate)
-    }
-}
-
-// Phase: Color stack top-down
-while (stack not empty) {
-    node = pop(stack)
-    colors_used = {colors of all colored neighbors}
-    available = {0..colorLimit-1} - colors_used
-    
-    if (available not empty) {
-        color[node] = pick(available)  // Pick first available
-    } else {
-        // No color: must have been selected for spilling
-        assign_spill_slot(node)
-    }
-}
-```
-
-### Phase 4: Rewrite Code
-
-For each spilled vreg, insert load/store instructions:
-
-```
-a = load x, 10       // Use scratch register
-...
-store x, 10, a       // Write back
-```
-
-## Example: Register Allocation
-
-### Input IR
-```cpp
-int compute(int a, int b, int c, int d) {
-    int x = a + b;      // v0 = v_a + v_b
-    int y = c * d;      // v1 = v_c * v_d
-    int z = x + y;      // v2 = v0 + v1
-    return z * 2;       // return v2 * 2
-}
-```
-
-### Liveness Analysis
-```
-v_a: block entry → used in line 1
-v_b: block entry → used in line 1
-v_c: block entry → used in line 2
-v_d: block entry → used in line 2
-v0:  line 1 → line 3 (result of a+b, used in x+y)
-v1:  line 2 → line 3 (result of c*d, used in x+y)
-v2:  line 3 → line 4 (result of x+y, used in return)
-```
-
-### Interference Graph
-```
-Nodes: {v_a, v_b, v_c, v_d, v0, v1, v2}
-
-Edges (simultaneous liveness):
-- v_a ↔ v_b (both live from entry to line 1)
-- v_c ↔ v_d (both live from entry to line 2)
-- v0 ↔ v1 (both live from line 1-2 to line 3)
-- v2 has no interference (becomes live after v0, v1 unused)
-```
-
-### Graph Coloring (8 GPR available)
-```
-Degree analysis:
-- v_a: degree 1 (only v_b)
-- v_b: degree 1 (only v_a)
-- v_c: degree 1 (only v_d)
-- v_d: degree 1 (only v_c)
-- v0: degree 1 (only v1)
-- v1: degree 1 (only v0)
-- v2: degree 0 (no neighbors!)
-
-Coloring:
-1. Remove v2 (degree 0) → color=x10
-2. Remove v1 (degree 1) → color=x11 (available)
-3. Remove v0 (degree 1, conflicts with v1→x11) → color=x10
-4. Remove v_d (degree 1, conflicts with v_c) → color=x12
-5. Remove v_c (degree 1, conflicts with v_d→x12) → color=x11
-6. Remove v_b (degree 1, conflicts with v_a) → color=x13
-7. Remove v_a (degree 1, conflicts with v_b→x13) → color=x12
-```
-
-**Result:** 0 spills! All variables fit in registers.
-
-## Register Banks
-
-### GPR (General Purpose)
-- **Range**: x10-x17 (a0-a7)
-- **Count**: 8 registers
-- **Used for**: Integer arithmetic, addresses, control flow
-- **Caller-saved**: Yes (temporary use)
-
-### FPR (Floating Point)
-- **Range**: f10-f17 (fa0-fa7)
-- **Count**: 8 registers
-- **Used for**: Floating-point arithmetic
-- **Caller-saved**: Yes
-
-### Vector
-- **Range**: v8-v23
-- **Count**: 16 registers
-- **Used for**: SIMD operations
-- **Caller-saved**: Yes
-
-## Spilling Strategy
-
-When graph coloring cannot assign a color:
-
-1. **Select Spill Candidate**: Pick vreg with lowest degree (heuristic)
-2. **Allocate Stack Slot**: Assign offset on stack
-3. **Rewrite Instructions**:
-   - Before use: `load scratch, [sp + offset]`
-   - After def: `store scratch, [sp + offset]`
-4. **Restart Coloring**: Rerun coloring algorithm (iterative refinement)
-
-### Stack Layout
-```
-SP → [old sp offset]
-     [spill slot 0]
-     [spill slot 1]
-     ...
-     [spill slot N]
-     [local variables]
-```
-
-Offset for slot i: `SP + (-8 * (i + 1))`
-
-## Performance Impact
-
-### Good Cases (Few Vregs)
-- Simple expressions fit in registers
-- 0 spills, minimal code bloat
-- **Comparable to or better than greedy**
-
-### Pathological Cases (High Register Pressure)
-- Many simultaneous live ranges
-- Selective spilling of worst vregs
-- **Better than greedy** (smarter decisions)
-
-### Benchmarks (Expected)
-```
-Metric              | Greedy  | Graph Coloring
-────────────────────┼─────────┼───────────────
-Spill instructions  | 15-20%  | 5-10%
-Code size           | +12%    | +3%
-Allocation time     | <1ms    | 2-3ms
-```
-
-## Coalescing Opportunities
-
-With graph coloring, we can identify and eliminate redundant moves:
-
-```asm
-;; Before coalescing
-mov a0, a1     ;; Identity move (redundant)
-ret
-
-;; After coalescing
-ret            ;; Removed!
-```
-
-This is detected during coloring: if `mov a0, a1` and we can assign same color to both, no move needed.
-
-## Integration with TensorC
-
-### Legacy Pipeline
-- All scalar operations use graph coloring
-- Replaces `RegAlloc` with `RegAllocGraphColoring`
-- Transparent to existing code (same interface)
-
-### Progressive Lowering Pipeline
-- Tensor operations still use original allocation (different architecture)
-- Future: Consider extending to tensor IR
-
-## Code Usage
-
-### From CodegenDriver
-```cpp
-// Automatic: CodegenDriver calls graph coloring allocator
-driver.lower_scalar_function(fn, "output.s");
-```
-
-### Direct Usage (if needed)
-```cpp
-#include "codegen/legacy/RegAllocGraphColoring.h"
-
-MachineFunction mf;
-// ... populate mf with machine instructions ...
-
-RegAllocGraphColoring alloc;
-alloc.allocate(mf);
-
-// Query diagnostics
-int spills = alloc.spill_count();
-int gprs = alloc.regs_used_gpr();
-```
-
-## Testing Graph Coloring
-
-### Test Cases
-1. **No interference**: All vregs can use same register → 0 spills
-2. **Chain interference**: v0↔v1↔v2 → minimal allocation
-3. **Complete graph**: All vregs interfere → spilling required
-4. **Mixed reg classes**: GPR + FPR separately → correct allocation
-
-### Verification
-- Assembly has correct register references
-- Spill loads/stores present when needed
-- Function termination correct (ret instruction present)
-- Instruction patterns match expected operations
-
-## Future Improvements
-
-1. **Coalescing**: Build coalescing graph for move elimination
-2. **Rematerialization**: Recompute cheap values vs. spilling
-3. **Biased coloring**: Prefer caller-saved registers
-4. **Multi-core coloring**: Parallel graph coloring for large functions
-5. **Machine learning**: Learn optimal spill thresholds
-
-## References
-
-- **Chaitin, G. J. (1982).** "Register Allocation & Spilling via Graph Coloring"
-- **Smith, M. et al.** "Improving Register Allocation for Subscripted Variables"
-- **Muchnick, S. "Advanced Compiler Design & Implementation"** (Chapter 16)
+TensorC's register allocator is a **linear-scan allocator** (Poletto-Sarkar
+algorithm) driven by real liveness analysis, implemented in
+`codegen/mir/Liveness.h/.cpp` and `codegen/mir/LinearScanRegAlloc.h/.cpp`.
+It replaced two earlier implementations:
+
+- A greedy allocator (`codegen/legacy/RegAlloc.cpp`, now deleted) that
+  assigned virtual registers to physical ones in ID order with **no
+  liveness analysis** — every vreg was treated as live for the whole
+  function, so it spilled far more than necessary (visible in the old
+  `test_legacy_reg_pressure.s` sample output, which spilled three
+  temporaries in a function small enough that none should have been
+  needed).
+- A from-scratch Chaitin's-algorithm graph-coloring allocator
+  (`codegen/legacy/RegAllocGraphColoring.cpp`, now deleted) that several
+  documents in this repository described as the production allocator, but
+  that was never actually wired into `codegen/CMakeLists.txt`'s build and
+  did not compile as written — `build_liveness_for_block` iterated an
+  always-empty vector via an always-false ternary, and `compute_liveness`
+  indexed a `std::map<int, LivenessInfo>` with a `std::string` key. It's
+  described in detail further down this document for historical interest,
+  but it never ran.
+
+Linear scan is a deliberately smaller step up from "no liveness at all"
+than graph coloring — well short of Chaitin's algorithm in allocation
+quality, but *actually correct and shipping*, which the alternative wasn't.
+Upgrading to graph coloring later is a reasonable follow-up; it should
+reuse the liveness infrastructure below rather than recompute it, since
+that part is architecture-agnostic and already correct.
+
+## How it works today
+
+### 1. Liveness (`codegen/mir/Liveness.cpp`)
+
+Standard two-step construction:
+
+1. **Per-block local use/def sets.** Walk each block's instructions in
+   order; a vreg is in `Use[B]` if it's read before any def of it within
+   `B`, and in `Def[B]` if it's written anywhere in `B`.
+2. **Backward dataflow fixed point** over the block graph:
+   `LiveOut[B] = ⋃ LiveIn[S]` for successors `S`;
+   `LiveIn[B] = Use[B] ∪ (LiveOut[B] − Def[B])`. Iterated to a fixed point.
+
+This runs over the **real CFG** — `MachineBasicBlock::preds`/`succs`, which
+are populated directly from the frontend's `ir::BasicBlock::preds`/`succs`
+(computed once by `CFGPass` during frontend compilation) rather than
+recomputed. This matters concretely: after `PhiElimination` runs, a
+variable that used to be a single SSA value can have *multiple* definition
+sites (one `COPY` per incoming edge — see `codegen/mir/PhiElimination.h`'s
+doc comment). Naively scanning "first textual def to last textual use"
+would either under- or over-shoot badly for a loop-carried variable;
+dataflow liveness over the real CFG doesn't have that problem.
+
+Each virtual register's per-block liveness is then flattened into a single
+`[start, end]` interval over a block-layout-order instruction numbering —
+the standard "fast" linear-scan simplification (no tracking of lifetime
+holes within an interval). This never under-approximates a live range (so
+it never lets two simultaneously-live values collide in the same physical
+register), but can occasionally spill more than a hole-aware allocator
+would.
+
+### 2. Allocation (`codegen/mir/LinearScanRegAlloc.cpp`)
+
+Classic Poletto-Sarkar linear scan, run independently per register class
+(GPR, FPR):
+
+1. Sort intervals by start point.
+2. Walk them in order, maintaining an `active` list of currently-assigned
+   intervals sorted by end point.
+3. At each new interval: expire `active` entries whose end precedes this
+   interval's start (freeing their registers), then look for a free,
+   non-busy physical register (see "Physical register constraints" below).
+4. If none is free: evict the `active` interval with the **furthest end
+   point** if that's later than the current interval's own end (the
+   classic `SpillAtInterval` policy) — spilling that one and giving its
+   register to the current interval, since the current interval has less
+   to lose. Otherwise spill the current interval itself.
+
+Register classes are entirely target-defined
+(`TargetRegisterInfo::allocatable(RegClass)`); the allocator itself
+contains no architecture-specific logic.
+
+### Physical register constraints
+
+Some physical registers are constrained outside the normal vreg→register
+mapping — a `CALL` clobbers every caller-saved register per the ABI, and a
+few instruction sequences pin specific registers (e.g. x86's `idiv` reading
+`RDX:RAX`). These are tracked as "busy" intervals: any `MachineInstr`
+operand with `is_physical == true`, plus each `MachineInstr::clobbers_gpr`/
+`clobbers_fpr` entry, marks that physical register unavailable for the
+instruction's position. A candidate physical register for a virtual
+interval is only offered if it's free for the *entire* interval, not just
+at its start — so a value live across a call site correctly can't land in
+a caller-saved register.
+
+### Spilling
+
+Two scratch physical registers per class are permanently reserved (the
+last two entries of each target's `allocatable()` list) so spill-reload
+code can always materialize a spilled operand without contending with the
+main allocation — this covers the worst realistic case for this
+instruction set (e.g. an x86 read-modify-write instruction with two
+distinct spilled operands, such as `dst += rhs` where both `dst`'s reload
+and `rhs`'s reload are needed simultaneously). Spilled values get a real
+stack frame slot (`MachineFunction::new_frame_object`), resolved to a
+concrete offset later by `PrologueEpilogInserter`.
+
+## Verification
+
+Register-pressure correctness is verified by execution, not just
+inspection: `codegen/tools/test_scalar_pipeline.cpp` includes a case with
+40 simultaneously-live temporaries against roughly 14 allocatable x86 GPRs,
+forcing real spill/reload code, and checks the *executed* result is
+correct — not just that the assembly looks plausible. See
+`REAL_EXECUTION_TESTING_GUIDE.md`.
+
+## Historical note: the dead graph-coloring allocator
+
+An earlier version of this document described
+`codegen/legacy/RegAllocGraphColoring.cpp` — liveness dataflow, interference
+graph construction, a Chaitin's-algorithm simplify/spill/select coloring
+loop — as the production allocator ("the TensorC compiler now uses a
+sophisticated graph coloring-based register allocator"). That was never
+true: the file was never added to `codegen/CMakeLists.txt`'s build and did
+not compile as written (see "Overview" above for the specific bugs). Both
+that file and this document's original algorithm write-up have been
+removed rather than kept as a stale reference; git history has the original
+text if it's useful as a starting point. If graph coloring is implemented
+for real in the future, it should live under `codegen/mir/` alongside
+`LinearScanRegAlloc.cpp` as an alternative allocator, reusing
+`Liveness.cpp`'s dataflow rather than reimplementing it.

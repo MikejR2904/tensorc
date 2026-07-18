@@ -1,5 +1,14 @@
 # Complete Instruction Coverage Verification
 
+> **Inaccurate — kept for historical reference only.** Same correction as
+> [VERIFICATION_CHECKLIST.md](VERIFICATION_CHECKLIST.md) and
+> [IR_INSTRUCTION_COVERAGE.md](IR_INSTRUCTION_COVERAGE.md): the "Legacy
+> Pipeline" this document verifies has been deleted and replaced (see
+> [codegen/README.md](../codegen/README.md)), and several of its "✅
+> Complete" scalar-instruction rows were never actually true. See
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md) for
+> current, execution-verified coverage.
+
 **Date**: 2026-05-16  
 **Build Status**: ✅ **SUCCESSFUL**  
 **Compiler**: MSVC 17.14 (Windows) + GCC/Clang

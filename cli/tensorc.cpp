@@ -15,6 +15,7 @@
 #include "../compiler/io/io.h"
 #include "../compiler/io/module_handler.h"
 #include "../compiler/ir/ir.h"
+#include "../codegen/CodegenDriver.h"
 
 static void print_usage()
 {
@@ -23,9 +24,14 @@ static void print_usage()
         << "Options:\n"
         << "  -h, --help      Show this help message\n"
         << "  -v, --version   Display compiler version\n"
+        << "  --print-ir      Print generated IR\n"
+        << "  --emit=asm      Emit target assembly\n"
+        << "  --target=<arch> Select codegen target (riscv64 or x86_64)\n"
+        << "  -o <path>       Output path for emitted assembly\n"
         << "\n"
         << "Example:\n"
-        << "  tensorc hello_world.tcc --print-ir\n";
+        << "  tensorc hello_world.tcc --print-ir\n"
+        << "  tensorc hello_world.tcc --emit=asm --target=x86_64 -o hello.s\n";
 }
  
 int main(int argc, char** argv)
@@ -36,9 +42,21 @@ int main(int argc, char** argv)
     }
     std::string first_arg = argv[1];
     bool print_ir = false;
+    bool emit_asm = false;
+    std::string target = "riscv64";
+    std::string output_path;
 
     for (int i = 1; i < argc; ++i) {
-        if (std::string(argv[i]) == "--print-ir") print_ir = true;
+        std::string arg = argv[i];
+        if (arg == "--print-ir") {
+            print_ir = true;
+        } else if (arg == "--emit=asm" || arg == "--emit-asm") {
+            emit_asm = true;
+        } else if (arg.rfind("--target=", 0) == 0) {
+            target = arg.substr(std::string("--target=").size());
+        } else if (arg == "-o" && i + 1 < argc) {
+            output_path = argv[++i];
+        }
     }
  
     if (first_arg == "-h" || first_arg == "--help") {
@@ -100,6 +118,18 @@ int main(int argc, char** argv)
         if (print_ir) {
             std::cout << "\n--- Generated IR ---\n";
             std::cout << ir::IRPrinter::print(*module) << "\n";
+        }
+
+        if (emit_asm) {
+            if (output_path.empty()) {
+                output_path = filepath.substr(0, filepath.size() - 4) + ".s";
+            }
+            codegen::CodegenDriver driver(target);
+            if (!driver.lower_module_to_asm(*module, output_path)) {
+                std::cerr << "tensorc: codegen failed: " << driver.last_diagnostic() << "\n";
+                return 1;
+            }
+            std::cout << "[TensorC] Wrote assembly: " << output_path << "\n";
         }
  
     } catch (const io::TensorCError& e) {

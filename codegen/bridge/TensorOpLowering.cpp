@@ -6,8 +6,24 @@
 #include "TensorOpLowering.h"
 #include <iostream>
 #include <algorithm>
+#include <cctype>
 
 namespace codegen::bridge {
+
+static std::string sanitize_symbol(std::string name, size_t fallback_id)
+{
+    if (!name.empty() && name[0] == '%') name.erase(name.begin());
+    if (name.empty()) name = "tensor_op_" + std::to_string(fallback_id);
+    for (char& ch : name) {
+        unsigned char c = static_cast<unsigned char>(ch);
+        if (!std::isalnum(c) && ch != '_') ch = '_';
+    }
+    unsigned char first = static_cast<unsigned char>(name[0]);
+    if (!std::isalpha(first) && name[0] != '_') {
+        name = "tensor_op_" + name;
+    }
+    return name;
+}
 
 bool TensorOpLoweringPass::run(ir::IRModule& mod)
 {
@@ -19,6 +35,7 @@ bool TensorOpLoweringPass::run(ir::IRModule& mod)
                 // Only process TensorOpInst; scalar instructions handled by legacy pipeline
                 auto* tensor_op = dynamic_cast<ir::TensorOpInst*>(inst.get());
                 if (!tensor_op) continue;
+                tensor_op->name = sanitize_symbol(tensor_op->name, lowered_count_++);
                 
                 std::string asm_code = lower_one(*tensor_op);
                 if (!asm_code.empty()) {

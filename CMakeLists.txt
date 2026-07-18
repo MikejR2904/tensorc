@@ -75,7 +75,7 @@ add_subdirectory(codegen/tools)
 
 # ==================== Driver Executable ====================
 add_executable(tensorc cli/tensorc.cpp)
-target_link_libraries(tensorc PRIVATE tensorc_lib)
+target_link_libraries(tensorc PRIVATE tensorc_lib codegen)
 
 # ==================== Integrated Tests ====================
 if(BUILD_TESTS)

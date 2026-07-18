@@ -35,16 +35,14 @@
 #include "../../compiler/ir/Instruction.h"
 #include "../lowering/Tiler.h"
 #include "../lowering/ScratchpadAllocator.h"
-#include "../lowering/StaticMMU.h"
-#include "../lowering/KReductionHandler.h"
 #include "../lowering/MemoryLegalizer.h"
-#include "../lowering/DependencyScheduler.h"
 #include "../lowering/Scheduler.h"
 #include "../targets/RiscVTargetEmitter.h"
 #include "../targets/X86TargetEmitter.h"
 #include <string>
 #include <map>
 #include <sstream>
+#include <cstddef>
  
 namespace codegen::bridge {
  
@@ -102,6 +100,7 @@ private:
     
     std::string target_;
     bool verbose_ = false;
+    size_t lowered_count_ = 0;
  
     // ── Main dispatcher ──────────────────────────────────────────────────────
     /// Lower a single TensorOpInst through all pipeline phases.

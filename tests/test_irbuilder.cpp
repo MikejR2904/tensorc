@@ -392,7 +392,15 @@ TEST_F(IRBuilderTest, WhileEntryFallsIntoHeader)
  
 // ─── 8. Let statement ────────────────────────────────────────────────────────
  
-TEST_F(IRBuilderTest, ImmutableLetBindsNameDirectly)
+// Scalar `let` bindings are always given a stack slot up front (see
+// IRBuilder::lower_let), not bound directly to the initializer's SSA value.
+// TensorC has no `mut` keyword, so any `let`-bound scalar can be reassigned
+// later via plain `x = ...`; promoting the slot lazily at the *first write*
+// instead of eagerly here is unsound whenever a loop body both reads and
+// writes the same variable (e.g. `s = s + i`) — the read is lowered before
+// the write's promotion, so it captures the pre-loop value as a fixed IR
+// operand forever instead of re-reading current state each iteration.
+TEST_F(IRBuilderTest, ImmutableLetAllocatesAStackSlot)
 {
     StmtKind sk;
     sk.tag = StmtKind::Tag::Let;
@@ -404,10 +412,19 @@ TEST_F(IRBuilderTest, ImmutableLetBindsNameDirectly)
 
     Value* v = builder.lookup("pi");
     ASSERT_NE(v, nullptr);
-    EXPECT_EQ(dynamic_cast<AllocaInst*>(v), nullptr);
+    EXPECT_NE(dynamic_cast<AllocaInst*>(v), nullptr);
+
+    // The initializer must actually be stored into that slot.
+    bool found_store = false;
+    for (auto& inst : bb->insts) {
+        if (auto* st = dynamic_cast<StoreInst*>(inst.get())) {
+            if (st->ptr.get() == v) found_store = true;
+        }
+    }
+    EXPECT_TRUE(found_store) << "expected a StoreInst writing the initializer into the alloca";
 }
- 
-TEST_F(IRBuilderTest, LetWithInitializerBindsDirectValue)
+
+TEST_F(IRBuilderTest, LetWithInitializerAllocatesAStackSlot)
 {
     StmtKind sk;
     sk.tag = StmtKind::Tag::Let;
@@ -419,7 +436,12 @@ TEST_F(IRBuilderTest, LetWithInitializerBindsDirectValue)
 
     Value* v = builder.lookup("count");
     ASSERT_NE(v, nullptr);
-    EXPECT_EQ(dynamic_cast<AllocaInst*>(v), nullptr);
+    EXPECT_NE(dynamic_cast<AllocaInst*>(v), nullptr);
+
+    // A subsequent read must load from the slot, not reuse a stale SSA value.
+    auto read_ident = ident("count", Type::i32());
+    Value* read = builder.lower_expr(*read_ident);
+    EXPECT_NE(dynamic_cast<LoadInst*>(read), nullptr);
 }
  
 // ─── 9. Tensor call lowering ──────────────────────────────────────────────────
@@ -569,8 +591,15 @@ TEST(IRBuilderRoundTripTest, ForwardPassRoundTrip)
     builder.define("x", x);
     builder.define("w", w);
  
-    // ts::matmul(x, w)
-    auto ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    // tensor::matmul(x, w) — the canonical module name, not the "ts" import
+    // alias: alias resolution (ns_aliases_) is only populated by
+    // IRBuilder::build() via register_import_aliases(), which this test
+    // doesn't call (it drives lower_expr() directly), so "ts" would resolve
+    // to itself, miss every canonical-name branch, and fall through to the
+    // handler-registry/stub-function path with no IRModule attached — see
+    // IRBuilder::lower_call()'s null-callee guard for what used to happen
+    // there instead of a clear error.
+    auto ns = std::make_unique<Expr>(ExprKind::makeId("tensor", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
     ExprKind mm_scope = ExprKind::makeScope(std::move(ns), "matmul");
     auto mm_callee = std::make_unique<Expr>(std::move(mm_scope), dpos());
     ExprKind mm_call_kind = ExprKind::makeCall(std::move(mm_callee), {});
@@ -582,8 +611,9 @@ TEST(IRBuilderRoundTripTest, ForwardPassRoundTrip)
     Value* mm_val = builder.lower_expr(*mm_call);
     builder.define("mm", mm_val);
  
-    // ts::relu(mm)
-    auto relu_ns = std::make_unique<Expr>(ExprKind::makeId("ts", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
+    // tensor::relu(mm) — see the matmul call above for why "tensor" and not
+    // the "ts" alias.
+    auto relu_ns = std::make_unique<Expr>(ExprKind::makeId("tensor", TyKind::Infer, IdentCtx::Ref, dpos()), dpos());
     ExprKind relu_scope = ExprKind::makeScope(std::move(relu_ns), "relu");
     auto relu_callee = std::make_unique<Expr>(std::move(relu_scope), dpos());
     ExprKind relu_call_kind = ExprKind::makeCall(std::move(relu_callee), {});

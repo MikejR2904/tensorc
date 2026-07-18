@@ -169,10 +169,11 @@ StmtPtr Parser::parseFnDecl()
     TyKind ret_ty = TyKind::Void;
     std::string ret_utn;
     std::optional<GenericParams> ret_tensor_gp;
-    if (match(TokenKind::ARROW))
+    if (match(TokenKind::ARROW)) {
         ret_ty = parseType();
         if (ret_ty == TyKind::Generic || ret_ty == TyKind::UserDef) ret_utn = previous.value;
         if (ret_ty == TyKind::Tensor && last_tensor_gp.has_value()) ret_tensor_gp = std::move(last_tensor_gp);
+    }
     // body
     Compound body = parseCompound();
     active_generic_names.clear();

@@ -170,7 +170,7 @@ private:
         if (auto* i = dynamic_cast<const AwaitInst*>(&inst))      { print_await(*i);       return; }
         if (auto* i = dynamic_cast<const ParallelForInst*>(&inst)){ print_parallel_for(*i);return; }
         if (auto* i = dynamic_cast<const ParallelMapInst*>(&inst)){ print_parallel_map(*i);return; }
-        if (auto* i = dynamic_cast<const BarrierInst*>(&inst))    { print_barrier();       return; }
+        if (dynamic_cast<const BarrierInst*>(&inst))               { print_barrier();       return; }
         if (auto* i = dynamic_cast<const CastInst*>(&inst))       { print_cast(*i);        return; }
         if (auto* i = dynamic_cast<const ReshapeInst*>(&inst))    { print_reshape(*i);     return; }
  
@@ -418,6 +418,26 @@ private:
                 return "Array<" + type_str(t->inner_type()) + ">";
             case Type::Kind::Tensor:
                 return "Tensor<" + type_str(t->inner_type()) + ">";
+            case Type::Kind::Map:
+                return "Map<" + type_str(t->key_type()) + ", " + type_str(t->val_type()) + ">";
+            case Type::Kind::Set:
+                return "Set<" + type_str(t->inner_type()) + ">";
+            case Type::Kind::Queue:
+                return "Queue<" + type_str(t->inner_type()) + ">";
+            case Type::Kind::Stack:
+                return "Stack<" + type_str(t->inner_type()) + ">";
+            case Type::Kind::Task:
+                return "Task<" + type_str(t->inner_type()) + ">";
+            case Type::Kind::Tuple:
+            {
+                std::string s = "Tuple<";
+                for (size_t i = 0; i < t->args.size(); ++i)
+                {
+                    s += type_str(t->args[i]);
+                    if (i + 1 < t->args.size()) s += ", ";
+                }
+                return s + ">";
+            }
             case Type::Kind::Fn:
             {
                 std::string s = "fn(";
@@ -632,6 +652,7 @@ private:
             case TensorOpCode::FusedMatMulSilu: return "fused.matmul_silu";
             case TensorOpCode::FusedMatMulTanh: return "fused.matmul_tanh";
             case TensorOpCode::FusedElemChain:   return "fused.elem_chain";
+            case TensorOpCode::Unknown:          return "unknown";
         }
         return "?";
     }

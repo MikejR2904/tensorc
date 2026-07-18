@@ -21,8 +21,8 @@ class IRBuilder
 {
 public:
     IRBuilder()
-        : default_handlers_(io::ModuleHandlerRegistry::with_builtins()),
-          handler_registry_(&default_handlers_)
+        : handler_registry_(&default_handlers_),
+          default_handlers_(io::ModuleHandlerRegistry::with_builtins())
     {}
  
     // Main entry to build IR from an AST program
@@ -448,6 +448,29 @@ private:
             return;
         }
         Value* rhs = lower_expr(*s.kind.let_expr);
+
+        // Scalar locals always get a stack slot up front, rather than binding
+        // the name directly to the initializer's SSA value. TensorC has no
+        // `mut` keyword — any `let`-bound name can be reassigned later via
+        // plain `x = ...` (see store_to_lvalue's "promote to mutable slot"
+        // branch) — and lazily creating that slot only at the *first write*
+        // is unsound whenever the same loop body both reads and writes the
+        // variable (e.g. `s = s + i` in a `while` loop): the read of `s` on
+        // the right-hand side is lowered *before* the assignment promotes it,
+        // so it captures the pre-loop value as a fixed IR operand forever —
+        // every iteration then recomputes the same constant instead of
+        // accumulating. Allocating eagerly means every read/write of a
+        // scalar local goes through Load/Store from the start, so a value
+        // stored on one iteration is always visible to the next. Structs/
+        // tensors keep direct SSA binding (unchanged) since their field-alias
+        // naming scheme (rename_field_aliases) assumes it.
+        if (rhs->type && (rhs->type->is_numeric() || rhs->type->is_bool())) {
+            auto* alloca = emit<AllocaInst>(fresh(id.name() + ".slot"), rhs->type);
+            emit<StoreInst>(vp(rhs), vp(alloca));
+            define(id.name(), alloca);
+            return;
+        }
+
         std::string old_name = rhs->name;
         rhs->name = "%" + id.name();
         rename_field_aliases(old_name, rhs->name);
@@ -801,6 +824,15 @@ private:
                 stub_fn = mod_->add_function(mangled,
                     Type::fn(param_tys, ret ? ret : Type::void_()), false);
                 global_functions[mangled] = stub_fn;
+            }
+            if (!stub_fn) {
+                // No IRModule to register a stub function in (e.g. lower_expr()
+                // invoked directly without build()) and no handler claimed the
+                // symbol either — CallInst::track_uses() unconditionally
+                // dereferences its callee operand, so constructing one here
+                // with a null callee would segfault rather than fail loudly.
+                throw std::runtime_error("IRBuilder: unresolved call to '" + canonical + "::" + sym +
+                                          "' (no module handler registered and no IRModule to stub it in)");
             }
             bool is_void = !ret || ret->is_void();
             return emit<CallInst>(is_void ? "" : fresh(), ret ? ret : Type::void_(), vp(stub_fn), std::move(args));

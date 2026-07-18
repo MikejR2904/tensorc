@@ -1,5 +1,16 @@
 # IR Instruction Coverage Checklist
 
+> **Inaccurate — kept for historical reference only.** The "Legacy Pipeline"
+> (InstrSelector → RegAlloc → AsmPrinter) this document describes has been
+> deleted and replaced by a target-independent Machine IR with real
+> liveness-based register allocation (see
+> [codegen/README.md](../codegen/README.md)). Several rows below marked
+> "✓ Complete" were never actually true even for the deleted pipeline —
+> e.g. `AllocaInst`, `PhiInst`, and `CastInst` fell through to a silent
+> no-op default visitor and produced no machine code at all. For what's
+> actually implemented and verified by real execution, see
+> [REAL_EXECUTION_TESTING_GUIDE.md](../REAL_EXECUTION_TESTING_GUIDE.md).
+
 Complete audit of all IR instructions and their lowering status.
 
 ## Scalar Instructions (Legacy Pipeline)
